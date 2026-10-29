@@ -9,7 +9,15 @@ import type {
   ProjectionDay,
   Override,
   CategoryColor,
+  ProjectionApiError,
 } from "./types";
+
+export class ApiError extends Error {
+  constructor(public status: number, public code?: string) {
+    super(code || `API error ${status}`);
+    this.name = "ApiError";
+  }
+}
 
 const BASE = "";
 
@@ -23,7 +31,13 @@ async function request<T>(
   });
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`API error ${res.status}: ${text}`);
+    let code: string | undefined;
+    try {
+      code = (JSON.parse(text) as ProjectionApiError).code;
+    } catch {
+      // Keep a stable generic error for non-JSON responses.
+    }
+    throw new ApiError(res.status, code);
   }
   if (res.status === 204) return undefined as T;
   return res.json();
@@ -218,6 +232,21 @@ export function updateActual(
 
 export function deleteActual(accountId: string, id: string): Promise<void> {
   return request<void>(`/api/accounts/${accountId}/actuals/${id}`, { method: "DELETE" });
+}
+
+export function updateTransaction(
+  accountId: string,
+  id: string,
+  data: { amount?: number; note?: string; occurredAt?: string }
+): Promise<void> {
+  return request<void>(`/api/accounts/${accountId}/transactions/${id}`, {
+    method: "PUT",
+    body: JSON.stringify(data),
+  });
+}
+
+export function deleteTransaction(accountId: string, id: string): Promise<void> {
+  return request<void>(`/api/accounts/${accountId}/transactions/${id}`, { method: "DELETE" });
 }
 
 // Categories (global, not account-scoped)

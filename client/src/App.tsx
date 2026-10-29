@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import type { Account, ActualSpend, IncomeSource, IncomingTransfer, PlannedExpense, Override, DateRange, ProjectionDay, CategoryColor } from "./types";
 import * as api from "./api";
 import DateRangeBar from "./components/DateRangeBar";
@@ -44,6 +44,7 @@ export default function App() {
   const [showAccountModal, setShowAccountModal] = useState(false);
 
   const [balance, setBalance] = useState<number | null>(null);
+  const [balanceError, setBalanceError] = useState<string | null>(null);
   const [income, setIncome] = useState<IncomeSource[]>([]);
   const [incomingTransfers, setIncomingTransfers] = useState<IncomingTransfer[]>([]);
   const [expenses, setExpenses] = useState<PlannedExpense[]>([]);
@@ -63,6 +64,8 @@ export default function App() {
   const [fullscreenChart, setFullscreenChart] = useState<ChartType | null>(null);
   const [projections, setProjections] = useState<ProjectionDay[]>([]);
   const [projectionsLoading, setProjectionsLoading] = useState(false);
+  const [projectionError, setProjectionError] = useState<string | null>(null);
+  const projectionRequestId = useRef(0);
 
   const refresh = useCallback(() => {
     setRefreshKey((k) => k + 1);
@@ -100,8 +103,10 @@ export default function App() {
 
       if (balRes) {
         setBalance(balRes.amount);
+        setBalanceError(null);
       } else {
         setBalance(null);
+        setBalanceError(null);
         setShowBalanceModal(true);
       }
 
@@ -117,6 +122,10 @@ export default function App() {
       }
       setCategoryColors(colorMap);
     } catch (err) {
+      if (err instanceof api.ApiError && err.status === 503 && err.code === "OCCURRENCE_PROCESSING_FAILED") {
+        setBalance(null);
+        setBalanceError("Die Aktualisierung des Kontostands ist fehlgeschlagen. Bitte versuchen Sie es erneut.");
+      }
       console.error("Failed to fetch data:", err);
     } finally {
       setLoading(false);
@@ -126,7 +135,11 @@ export default function App() {
   // Fetch projections for the active account
   const fetchProjections = useCallback(async () => {
     if (!activeAccountId) return;
+    const requestId = ++projectionRequestId.current;
     setProjectionsLoading(true);
+    setProjections([]);
+    setProjectionError(null);
+    setFullscreenChart(null);
     try {
       const activeOverrides = overrides.length > 0 ? overrides : undefined;
       const range =
@@ -134,11 +147,24 @@ export default function App() {
           ? { days: dateRange.days }
           : { startDate: dateRange.startDate, endDate: dateRange.endDate };
       const result = await api.getProjections(activeAccountId, range, activeOverrides);
+      if (requestId !== projectionRequestId.current) return;
       setProjections(result);
     } catch (err) {
+      if (requestId !== projectionRequestId.current) return;
+      if (err instanceof api.ApiError && err.status === 409 && err.code === "NO_HISTORICAL_SNAPSHOT") {
+        setProjectionError("Für diesen Zeitraum liegt kein passender Kontostand vor.");
+      } else if (err instanceof api.ApiError && err.status === 409 && err.code === "NO_BALANCE_SNAPSHOT") {
+        setProjectionError("Bitte zuerst einen aktuellen Kontostand festlegen.");
+      } else if (err instanceof api.ApiError && err.status === 503 && err.code === "OCCURRENCE_PROCESSING_FAILED") {
+        setProjectionError("Fällige Buchungen konnten nicht verarbeitet werden. Bitte erneut versuchen.");
+      } else {
+        setProjectionError("Die Projektionen konnten nicht geladen werden.");
+      }
       console.error("Failed to fetch projections:", err);
     } finally {
-      setProjectionsLoading(false);
+      if (requestId === projectionRequestId.current) {
+        setProjectionsLoading(false);
+      }
     }
   }, [activeAccountId, dateRange, overrides, refreshKey]);
 
@@ -181,6 +207,17 @@ export default function App() {
   function handleActualsRefresh() {
     if (!activeAccountId) return;
     api.getActuals(activeAccountId).then(setActuals).catch(console.error);
+    api.getBalance(activeAccountId)
+      .then((result) => setBalance(result ? result.amount : null))
+      .catch(console.error);
+    refresh();
+  }
+
+  function handleTransactionRefresh() {
+    if (!activeAccountId) return;
+    api.getBalance(activeAccountId)
+      .then((result) => setBalance(result ? result.amount : null))
+      .catch(console.error);
     refresh();
   }
 
@@ -216,6 +253,9 @@ export default function App() {
   }
 
   function renderChart() {
+    if (projectionError) {
+      return <div className="alert alert-warning">{projectionError}</div>;
+    }
     if (projectionsLoading && projections.length === 0) {
       return (
         <div className="card bg-base-100 shadow-xl">
@@ -331,6 +371,12 @@ export default function App() {
         </div>
       </div>
 
+      {balanceError && (
+        <div className="alert alert-warning mx-6 mt-4">
+          {balanceError}
+        </div>
+      )}
+
       {/* Main Content */}
       <main className="container mx-auto p-4 max-w-6xl space-y-6">
         {/* Controls bar: view toggle + chart type + date range */}
@@ -370,13 +416,17 @@ export default function App() {
         </div>
 
         {/* Chart or Ledger */}
-        {viewMode === "chart" ? (
+        {projectionError ? (
+          <div className="alert alert-warning">{projectionError}</div>
+        ) : viewMode === "chart" ? (
           renderChart()
         ) : (
           <LedgerView
             projections={projections}
             dateRange={dateRange}
             loading={projectionsLoading}
+            accountId={activeAccountId}
+            onRefresh={handleTransactionRefresh}
           />
         )}
 
@@ -452,7 +502,7 @@ export default function App() {
       />
 
       <ChartFullscreen
-        open={fullscreenChart !== null}
+        open={fullscreenChart !== null && !projectionError}
         chartType={fullscreenChart ?? "projection"}
         projections={projections}
         categoryColors={categoryColors}

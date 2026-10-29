@@ -77,6 +77,7 @@ export interface ActualSpend {
 }
 
 export interface ProjectionEvent {
+  id?: string;
   name: string;
   amount: number;
   type: "income" | "expense";
@@ -95,6 +96,14 @@ export interface ProjectionDay {
   date: string;
   balance: number;
   events: ProjectionEvent[];
+}
+
+export interface ProjectionApiError {
+  code:
+    | "NO_HISTORICAL_SNAPSHOT"
+    | "NO_BALANCE_SNAPSHOT"
+    | "OCCURRENCE_PROCESSING_FAILED"
+    | string;
 }
 
 export interface Override {

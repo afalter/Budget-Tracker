@@ -1,10 +1,13 @@
 import { useState, useMemo } from "react";
 import type { ProjectionDay, DateRange } from "../types";
+import * as api from "../api";
 
 interface Props {
+  accountId: string;
   projections: ProjectionDay[];
   dateRange: DateRange;
   loading: boolean;
+  onRefresh: () => void;
 }
 
 type FilterType = "all" | "income" | "expense" | "events-only";
@@ -41,9 +44,32 @@ function rangeLabel(dateRange: DateRange): string {
   return `over ${diffDays} days`;
 }
 
-export default function LedgerView({ projections, dateRange, loading }: Props) {
+export default function LedgerView({ accountId, projections, dateRange, loading, onRefresh }: Props) {
   const [filter, setFilter] = useState<FilterType>("all");
   const [search, setSearch] = useState("");
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editDate, setEditDate] = useState("");
+  const [editAmount, setEditAmount] = useState("");
+  const [editNote, setEditNote] = useState("");
+
+  async function saveEdit() {
+    if (!editingId) return;
+    const amount = Number(editAmount);
+    if (!editDate || !Number.isFinite(amount) || amount < 0) return;
+    await api.updateTransaction(accountId, editingId, {
+      amount,
+      note: editNote,
+      occurredAt: editDate,
+    });
+    setEditingId(null);
+    onRefresh();
+  }
+
+  async function deleteTransaction(id: string) {
+    if (!window.confirm("Delete this actual transaction?")) return;
+    await api.deleteTransaction(accountId, id);
+    onRefresh();
+  }
 
   const ledgerRows = useMemo(() => {
     const rows: {
@@ -53,6 +79,7 @@ export default function LedgerView({ projections, dateRange, loading }: Props) {
       amount: number;
       balance: number;
       isActual?: boolean;
+      id?: string;
     }[] = [];
 
     for (const day of projections) {
@@ -87,6 +114,7 @@ export default function LedgerView({ projections, dateRange, loading }: Props) {
             amount: event.amount,
             balance: day.balance,
             isActual: event.isActual,
+            id: event.id,
           });
         }
       }
@@ -203,6 +231,25 @@ export default function LedgerView({ projections, dateRange, loading }: Props) {
           </span>
         </div>
 
+        {editingId && (
+          <div className="flex flex-wrap items-end gap-2 p-3 mb-3 rounded-lg bg-base-200">
+            <label className="form-control">
+              <span className="label-text text-xs">Date</span>
+              <input className="input input-bordered input-sm" type="date" value={editDate} onChange={(e) => setEditDate(e.target.value)} />
+            </label>
+            <label className="form-control">
+              <span className="label-text text-xs">Amount</span>
+              <input className="input input-bordered input-sm" type="number" min="0" step="0.01" value={editAmount} onChange={(e) => setEditAmount(e.target.value)} />
+            </label>
+            <label className="form-control flex-1 min-w-48">
+              <span className="label-text text-xs">Description</span>
+              <input className="input input-bordered input-sm" value={editNote} onChange={(e) => setEditNote(e.target.value)} />
+            </label>
+            <button className="btn btn-primary btn-sm" onClick={saveEdit}>Save</button>
+            <button className="btn btn-ghost btn-sm" onClick={() => setEditingId(null)}>Cancel</button>
+          </div>
+        )}
+
         {/* Table */}
         {loading && projections.length === 0 ? (
           <div className="flex items-center justify-center h-32">
@@ -218,6 +265,7 @@ export default function LedgerView({ projections, dateRange, loading }: Props) {
                   <th className="text-right w-24">Income</th>
                   <th className="text-right w-24">Expense</th>
                   <th className="text-right w-28">Balance</th>
+                  <th className="w-28"></th>
                 </tr>
               </thead>
               <tbody>
@@ -263,11 +311,27 @@ export default function LedgerView({ projections, dateRange, loading }: Props) {
                     >
                       {formatCurrency(row.balance)}
                     </td>
+                    <td className="whitespace-nowrap">
+                      {row.isActual && row.id && (
+                        <>
+                          <button
+                            className="btn btn-ghost btn-xs"
+                            onClick={() => {
+                              setEditingId(row.id!);
+                              setEditDate(row.date);
+                              setEditAmount(String(row.amount));
+                              setEditNote(row.name);
+                            }}
+                          >Edit</button>
+                          <button className="btn btn-ghost btn-xs text-error" onClick={() => deleteTransaction(row.id!)}>Delete</button>
+                        </>
+                      )}
+                    </td>
                   </tr>
                 ))}
                 {ledgerRows.length === 0 && (
                   <tr>
-                    <td colSpan={5} className="text-center py-8 text-base-content/50">
+                    <td colSpan={6} className="text-center py-8 text-base-content/50">
                       {search
                         ? "No transactions match your search."
                         : "No data for this period."}
