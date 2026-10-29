@@ -124,7 +124,7 @@ export default function App() {
     } catch (err) {
       if (err instanceof api.ApiError && err.status === 503 && err.code === "OCCURRENCE_PROCESSING_FAILED") {
         setBalance(null);
-        setBalanceError("Die Aktualisierung des Kontostands ist fehlgeschlagen. Bitte versuchen Sie es erneut.");
+        setBalanceError("Balance update failed. Please try again.");
       }
       console.error("Failed to fetch data:", err);
     } finally {
@@ -152,13 +152,13 @@ export default function App() {
     } catch (err) {
       if (requestId !== projectionRequestId.current) return;
       if (err instanceof api.ApiError && err.status === 409 && err.code === "NO_HISTORICAL_SNAPSHOT") {
-        setProjectionError("Für diesen Zeitraum liegt kein passender Kontostand vor.");
+        setProjectionError("No matching balance snapshot exists for this period.");
       } else if (err instanceof api.ApiError && err.status === 409 && err.code === "NO_BALANCE_SNAPSHOT") {
-        setProjectionError("Bitte zuerst einen aktuellen Kontostand festlegen.");
+        setProjectionError("Please set a current balance first.");
       } else if (err instanceof api.ApiError && err.status === 503 && err.code === "OCCURRENCE_PROCESSING_FAILED") {
-        setProjectionError("Fällige Buchungen konnten nicht verarbeitet werden. Bitte erneut versuchen.");
+        setProjectionError("Due transactions could not be processed. Please try again.");
       } else {
-        setProjectionError("Die Projektionen konnten nicht geladen werden.");
+        setProjectionError("Projections could not be loaded.");
       }
       console.error("Failed to fetch projections:", err);
     } finally {
