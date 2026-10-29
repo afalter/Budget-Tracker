@@ -8,6 +8,7 @@ import projectionsRoutes from "./routes/projections";
 import categoriesRoutes from "./routes/categories";
 import actualsRoutes from "./routes/actuals";
 import spreadsheetRoutes from "./routes/spreadsheet";
+import transactionsRoutes from "./routes/transactions";
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -25,6 +26,7 @@ app.use("/api/accounts/:accountId/expenses", expensesRoutes);
 app.use("/api/accounts/:accountId/actuals", actualsRoutes);
 app.use("/api/accounts/:accountId/projections", projectionsRoutes);
 app.use("/api/accounts/:accountId/spreadsheet", spreadsheetRoutes);
+app.use("/api/accounts/:accountId/transactions", transactionsRoutes);
 
 // Global routes
 app.use("/api/categories", categoriesRoutes);
