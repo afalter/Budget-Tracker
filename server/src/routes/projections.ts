@@ -1,10 +1,13 @@
 import { Router, Request, Response } from "express";
-import { Interval } from "@prisma/client";
+import { Interval, Prisma, PrismaClient } from "@prisma/client";
 import prisma from "../lib/prisma";
+import { getEffectiveAmount, matchesInterval } from "../lib/projectionEngine";
+import { processDueOccurrencesForAccount } from "../lib/occurrenceProcessing";
 
 const router = Router({ mergeParams: true });
 
 interface ProjectionEvent {
+  id?: string;
   type: "income" | "expense";
   name: string;
   amount: number;
@@ -22,58 +25,6 @@ interface ProjectionDay {
 interface Override {
   id: string;
   active: boolean;
-}
-
-function matchesInterval(
-  interval: Interval,
-  startDate: Date,
-  checkDate: Date
-): boolean {
-  const start = new Date(
-    Date.UTC(
-      startDate.getUTCFullYear(),
-      startDate.getUTCMonth(),
-      startDate.getUTCDate()
-    )
-  );
-  const check = new Date(
-    Date.UTC(
-      checkDate.getUTCFullYear(),
-      checkDate.getUTCMonth(),
-      checkDate.getUTCDate()
-    )
-  );
-
-  if (check < start) return false;
-
-  const diffMs = check.getTime() - start.getTime();
-  const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
-
-  switch (interval) {
-    case "ONE_TIME":
-      return diffDays === 0;
-    case "DAILY":
-      return true;
-    case "WEEKLY":
-      return diffDays % 7 === 0;
-    case "BIWEEKLY":
-      return diffDays % 14 === 0;
-    case "MONTHLY":
-      return check.getUTCDate() === start.getUTCDate();
-    case "QUARTERLY":
-      if (check.getUTCDate() !== start.getUTCDate()) return false;
-      const monthDiff =
-        (check.getUTCFullYear() - start.getUTCFullYear()) * 12 +
-        (check.getUTCMonth() - start.getUTCMonth());
-      return monthDiff >= 0 && monthDiff % 3 === 0;
-    case "YEARLY":
-      return (
-        check.getUTCMonth() === start.getUTCMonth() &&
-        check.getUTCDate() === start.getUTCDate()
-      );
-    default:
-      return false;
-  }
 }
 
 interface ItemWithAdjustments {
@@ -98,33 +49,131 @@ interface ActualForDay {
   forecastExpenseId: string | null;
 }
 
-function getEffectiveAmount(
-  item: { amount: number; isVariable: boolean; priceAdjustments: { amount: number; startDate: Date }[] },
-  currentDate: Date
-): number {
-  if (!item.isVariable || item.priceAdjustments.length === 0) {
-    return item.amount;
-  }
-  let effectiveAmount = item.amount;
-  for (const adj of item.priceAdjustments) {
-    const adjDate = new Date(Date.UTC(adj.startDate.getUTCFullYear(), adj.startDate.getUTCMonth(), adj.startDate.getUTCDate()));
-    const checkDate = new Date(Date.UTC(currentDate.getUTCFullYear(), currentDate.getUTCMonth(), currentDate.getUTCDate()));
-    if (adjDate <= checkDate) {
-      effectiveAmount = adj.amount;
-    } else {
-      break;
-    }
-  }
-  return effectiveAmount;
+interface ActualTransactionForDay {
+  id?: string;
+  type: "INCOME" | "EXPENSE";
+  amount: number;
+  name: string;
+  category: string | null;
+  affectsBalance: boolean;
 }
 
-function applyDay(
+interface MaterializedActualTransaction {
+  id?: string;
+  type: "INCOME" | "EXPENSE";
+  amount: number | Prisma.Decimal;
+  occurredAt: Date;
+  deletedAt: Date | null;
+  note: string | null;
+  category: string | null;
+  occurrence: {
+    status: string;
+    dueDate: Date;
+    plannedExpenseId: string | null;
+    nameSnapshot: string;
+    categorySnapshot: string | null;
+  } | null;
+}
+
+export function buildActualTransactionProjectionData(
+  transactions: MaterializedActualTransaction[],
+  balanceStartDate: Date,
+  includeStartDateTransactions = false
+): {
+  actualTransactionsByDate: Map<string, ActualTransactionForDay[]>;
+  coveredExpensesByDate: Map<string, Set<string>>;
+} {
+  const actualTransactionsByDate = new Map<string, ActualTransactionForDay[]>();
+  const coveredExpensesByDate = new Map<string, Set<string>>();
+  const balanceStartKey = balanceStartDate.toISOString().split("T")[0];
+
+  for (const transaction of transactions) {
+    if (transaction.deletedAt) continue;
+    if (transaction.occurrence && transaction.occurrence.status !== "COMPLETED") continue;
+    const occurredDateKey = transaction.occurredAt.toISOString().split("T")[0];
+    const actualEvent: ActualTransactionForDay = {
+      type: transaction.type,
+      amount: Number(transaction.amount),
+      name: transaction.note || transaction.occurrence?.nameSnapshot || "Actual transaction",
+      category: transaction.category || transaction.occurrence?.categorySnapshot || null,
+      affectsBalance: includeStartDateTransactions
+        ? occurredDateKey >= balanceStartKey
+        : occurredDateKey > balanceStartKey,
+    };
+      if (transaction.id) actualEvent.id = transaction.id;
+    const events = actualTransactionsByDate.get(occurredDateKey);
+    if (events) events.push(actualEvent);
+    else actualTransactionsByDate.set(occurredDateKey, [actualEvent]);
+
+    const occurrence = transaction.occurrence;
+    if (!occurrence || occurrence.status !== "COMPLETED" || !occurrence.plannedExpenseId) continue;
+    const dueDateKey = occurrence.dueDate.toISOString().split("T")[0];
+    const covered = coveredExpensesByDate.get(dueDateKey) ?? new Set<string>();
+    covered.add(occurrence.plannedExpenseId);
+    coveredExpensesByDate.set(dueDateKey, covered);
+  }
+
+  return { actualTransactionsByDate, coveredExpensesByDate };
+}
+
+export async function calculateBalanceAt(
+  db: PrismaClient,
+  accountId: string,
+  snapshot: { amount: number; date: Date },
+  throughExclusive: Date
+): Promise<number> {
+  const snapshotDate = new Date(Date.UTC(
+    snapshot.date.getUTCFullYear(),
+    snapshot.date.getUTCMonth(),
+    snapshot.date.getUTCDate(),
+  ));
+  const fromDate = new Date(snapshotDate);
+  fromDate.setUTCDate(fromDate.getUTCDate() + 1);
+  const transactions = await db.actualTransaction.findMany({
+    where: {
+      accountId,
+      deletedAt: null,
+      occurredAt: { gte: fromDate, lt: throughExclusive },
+    },
+    select: { type: true, amount: true },
+  });
+
+  let balance = new Prisma.Decimal(snapshot.amount);
+  for (const transaction of transactions) {
+    balance = transaction.type === "INCOME"
+      ? balance.add(transaction.amount)
+      : balance.sub(transaction.amount);
+  }
+  return balance.toNumber();
+}
+
+export async function calculateCurrentBalance(
+  db: PrismaClient,
+  accountId: string,
+  snapshot: { amount: number; date: Date },
+  today: Date
+): Promise<number> {
+  const throughExclusive = new Date(Date.UTC(
+    today.getUTCFullYear(),
+    today.getUTCMonth(),
+    today.getUTCDate() + 1,
+  ));
+  return calculateBalanceAt(db, accountId, snapshot, throughExclusive);
+}
+
+export function isHistoricalWindow(windowStart: Date, todayUTC: Date): boolean {
+  return windowStart < todayUTC;
+}
+
+export function applyDay(
   currentDate: Date,
   runningBalance: number,
   effectiveIncome: { interval: Interval; startDate: Date; active: boolean; name: string; amount: number }[],
   effectiveExpenses: ItemWithAdjustments[],
   incomingTransfers: ItemWithAdjustments[],
-  actualsForDay: ActualForDay[]
+  actualsForDay: ActualForDay[],
+  coveredExpenseIds = new Set<string>(),
+  actualTransactionsForDay: ActualTransactionForDay[] = []
 ): { balance: number; events: ProjectionEvent[] } {
   const events: ProjectionEvent[] = [];
   let balance = runningBalance;
@@ -172,12 +221,31 @@ function applyDay(
     balance -= actual.amount;
   }
 
+  // Actual transactions are always displayed on their stored occurredAt date.
+  // Transactions through today are already included in the start balance.
+  for (const actual of actualTransactionsForDay) {
+    const event: ProjectionEvent = {
+      id: actual.id,
+      type: actual.type === "INCOME" ? "income" : "expense",
+      name: actual.name,
+      amount: actual.amount,
+      isActual: true,
+    };
+    if (actual.category) event.category = actual.category;
+    events.push(event);
+    if (actual.affectsBalance) {
+      balance = actual.type === "INCOME"
+        ? balance + actual.amount
+        : balance - actual.amount;
+    }
+  }
+
   // Forecast expenses — skip any covered by actuals
   for (const expense of effectiveExpenses) {
     if (!expense.active) continue;
     if (expense.endDate && currentDate > expense.endDate) continue;
     if (matchesInterval(expense.interval, expense.startDate, currentDate)) {
-      if (coveredForecastIds.has(expense.id)) continue;
+      if (coveredForecastIds.has(expense.id) || coveredExpenseIds.has(expense.id)) continue;
       const amount = getEffectiveAmount(expense, currentDate);
       const event: ProjectionEvent = { type: "expense", name: expense.name, amount };
       if (expense.category) event.category = expense.category;
@@ -194,6 +262,17 @@ function applyDay(
 router.get("/", async (req: Request, res: Response) => {
   try {
     const { accountId } = req.params;
+
+    try {
+      await processDueOccurrencesForAccount(prisma, accountId);
+    } catch (error) {
+      console.error("Failed to process due occurrences:", error);
+      res.status(503).json({
+        code: "OCCURRENCE_PROCESSING_FAILED",
+        error: "Failed to process due occurrences",
+      });
+      return;
+    }
 
     let overrides: Override[] = [];
     if (req.query.overrides) {
@@ -235,11 +314,26 @@ router.get("/", async (req: Request, res: Response) => {
     if (windowEnd > maxEnd) windowEnd = maxEnd;
 
     // Fetch account-scoped data + incoming transfers + actuals
-    const latestBalance = await prisma.balanceSnapshot.findFirst({
-      where: { accountId },
-      orderBy: { date: "desc" },
+    const historical = isHistoricalWindow(windowStart, todayUTC);
+    const historicalSnapshotEnd = new Date(windowStart);
+    historicalSnapshotEnd.setUTCDate(historicalSnapshotEnd.getUTCDate() + 1);
+    const balanceSnapshot = await prisma.balanceSnapshot.findFirst({
+      where: historical
+        ? { accountId, date: { lt: historicalSnapshotEnd } }
+        : { accountId },
+      orderBy: [{ date: "desc" }, { createdAt: "desc" }],
     });
-    let runningBalance = latestBalance?.amount ?? 0;
+    if (!balanceSnapshot) {
+      res.status(409).json({
+        code: historical ? "NO_HISTORICAL_SNAPSHOT" : "NO_BALANCE_SNAPSHOT",
+      });
+      return;
+    }
+    let runningBalance = balanceSnapshot
+      ? historical
+        ? await calculateBalanceAt(prisma, accountId, balanceSnapshot, windowStart)
+        : await calculateCurrentBalance(prisma, accountId, balanceSnapshot, todayUTC)
+      : 0;
 
     const [incomeSources, expenses, rawTransfers, actuals] = await Promise.all([
       prisma.incomeSource.findMany({ where: { accountId } }),
@@ -264,6 +358,33 @@ router.get("/", async (req: Request, res: Response) => {
         include: { forecastExpense: { select: { id: true, name: true } } },
       }),
     ]);
+
+    const materializedExpenses = await prisma.actualTransaction.findMany({
+      where: { accountId, deletedAt: null },
+      select: {
+        id: true,
+        type: true,
+        amount: true,
+        occurredAt: true,
+        deletedAt: true,
+        note: true,
+        category: true,
+        occurrence: {
+          select: {
+            status: true,
+            dueDate: true,
+            plannedExpenseId: true,
+            nameSnapshot: true,
+            categorySnapshot: true,
+          },
+        },
+      },
+    });
+    const { actualTransactionsByDate, coveredExpensesByDate } = buildActualTransactionProjectionData(
+      materializedExpenses,
+      historical ? windowStart : todayUTC,
+      historical,
+    );
 
     // Build actuals map: "YYYY-MM-DD" → ActualForDay[]
     const actualsMap = new Map<string, ActualForDay[]>();
@@ -313,7 +434,9 @@ router.get("/", async (req: Request, res: Response) => {
       while (current < windowStart) {
         const dateKey = current.toISOString().split("T")[0];
         const actualsForDay = actualsMap.get(dateKey) || [];
-        const result = applyDay(current, runningBalance, effectiveIncome, effectiveExpenses, incomingTransfers, actualsForDay);
+        const coveredExpenseIds = coveredExpensesByDate.get(dateKey) ?? new Set<string>();
+        const actualTransactionsForDay = actualTransactionsByDate.get(dateKey) || [];
+        const result = applyDay(current, runningBalance, effectiveIncome, effectiveExpenses, incomingTransfers, actualsForDay, coveredExpenseIds, actualTransactionsForDay);
         runningBalance = result.balance;
         current.setUTCDate(current.getUTCDate() + 1);
       }
@@ -326,7 +449,9 @@ router.get("/", async (req: Request, res: Response) => {
     while (current <= windowEnd) {
       const dateKey = current.toISOString().split("T")[0];
       const actualsForDay = actualsMap.get(dateKey) || [];
-      const result = applyDay(current, runningBalance, effectiveIncome, effectiveExpenses, incomingTransfers, actualsForDay);
+      const coveredExpenseIds = coveredExpensesByDate.get(dateKey) ?? new Set<string>();
+      const actualTransactionsForDay = actualTransactionsByDate.get(dateKey) || [];
+      const result = applyDay(current, runningBalance, effectiveIncome, effectiveExpenses, incomingTransfers, actualsForDay, coveredExpenseIds, actualTransactionsForDay);
       runningBalance = result.balance;
 
       projections.push({
