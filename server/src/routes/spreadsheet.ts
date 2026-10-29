@@ -1,13 +1,59 @@
-import { Router } from "express";
+import { Request, Router } from "express";
 import ExcelJS from "exceljs";
 import multer from "multer";
 import prisma from "../lib/prisma";
-import { Interval, IncomeSource, PlannedExpense, PriceAdjustment } from "@prisma/client";
+import { Interval, IncomeSource, PlannedExpense, PriceAdjustment, Prisma } from "@prisma/client";
+import { archiveIncomeSources, archivePlannedExpenses } from "../lib/archiveRules";
 
 const router = Router({ mergeParams: true });
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
 const VALID_INTERVALS = Object.values(Interval);
+
+export interface SpreadsheetImportResults {
+  balance: { updated: boolean };
+  income: { created: number; updated: number; deleted: number };
+  expenses: { created: number; updated: number; deleted: number };
+  priceAdjustments: { created: number; updated: number; deleted: number };
+  actualSpends: { created: number; updated: number; deleted: number };
+  categories: { created: number; updated: number };
+  errors: string[];
+}
+
+
+class SpreadsheetValidationError extends Error {}
+
+export async function runImportTransaction<T>(
+  work: (tx: Prisma.TransactionClient) => Promise<T>
+): Promise<T> {
+  return prisma.$transaction(work);
+}
+
+export function validateRuleSheet(
+  sheet: ExcelJS.Worksheet,
+  kind: "Income" | "Expense"
+): void {
+  sheet.eachRow((row, rowNum) => {
+    if (rowNum === 1) return;
+
+    const name = String(row.getCell(2).value || "").trim();
+    const hasData = name || row.getCell(1).value || row.getCell(3).value || row.getCell(4).value || row.getCell(5).value;
+    if (!hasData) return;
+
+    const amount = Number(row.getCell(3).value);
+    const interval = String(row.getCell(4).value || "").trim().toUpperCase();
+    const startDate = parseDate(row.getCell(5).value);
+    const errors: string[] = [];
+    if (!name) errors.push("name is required");
+    if (!hasCellValue(row.getCell(3).value) || !Number.isFinite(amount)) errors.push("invalid amount");
+    if (!VALID_INTERVALS.includes(interval as Interval)) errors.push(`invalid interval "${interval}"`);
+    if (!startDate) errors.push("invalid start date");
+    if (errors.length > 0) {
+      throw new SpreadsheetValidationError(`${kind} row ${rowNum}: ${errors.join(", ")}`);
+    }
+  });
+}
+
 
 // ─── Color palette ───────────────────────────────────────────────────────────
 
@@ -141,9 +187,101 @@ function parseBool(val: unknown): boolean {
   return s === "TRUE" || s === "YES" || s === "1";
 }
 
+function hasCellValue(value: unknown): boolean {
+  return value !== undefined && value !== null && String(value).trim() !== "";
+}
+
+function validateBoolean(value: unknown, label: string, errors: string[]): void {
+  if (!hasCellValue(value)) return;
+  if (typeof value === "boolean") return;
+  const normalized = String(value).trim().toUpperCase();
+  if (!["TRUE", "FALSE", "YES", "NO", "1", "0"].includes(normalized)) {
+    errors.push(`${label}: invalid boolean`);
+  }
+}
+
+function validateWorkbook(wb: ExcelJS.Workbook): void {
+  const errors: string[] = [];
+
+  const balanceSheet = wb.getWorksheet("Balance");
+  if (balanceSheet) {
+    const row = balanceSheet.getRow(2);
+    const hasData = hasCellValue(row.getCell(1).value) || hasCellValue(row.getCell(2).value);
+    if (hasData) {
+      if (!hasCellValue(row.getCell(1).value) || !Number.isFinite(Number(row.getCell(1).value))) errors.push("Balance row 2: invalid amount");
+      if (!parseDate(row.getCell(2).value)) errors.push("Balance row 2: invalid date");
+    }
+  }
+
+  const incomeSheet = wb.getWorksheet("Income Sources");
+  if (incomeSheet) validateRuleSheet(incomeSheet, "Income");
+
+  const expenseSheet = wb.getWorksheet("Planned Expenses");
+  if (expenseSheet) {
+    validateRuleSheet(expenseSheet, "Expense");
+    expenseSheet.eachRow((row, rowNum) => {
+      if (rowNum === 1) return;
+      const hasData = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11].some((column) => hasCellValue(row.getCell(column).value));
+      if (!hasData) return;
+      const rowErrors: string[] = [];
+      if (hasCellValue(row.getCell(6).value) && !parseDate(row.getCell(6).value)) rowErrors.push("invalid end date");
+      validateBoolean(row.getCell(7).value, "active", rowErrors);
+      validateBoolean(row.getCell(9).value, "isVariable", rowErrors);
+      validateBoolean(row.getCell(10).value, "isTransfer", rowErrors);
+      if (rowErrors.length > 0) errors.push(`Expense row ${rowNum}: ${rowErrors.join(", ")}`);
+    });
+  }
+
+  const priceSheet = wb.getWorksheet("Price Adjustments");
+  if (priceSheet) {
+    priceSheet.eachRow((row, rowNum) => {
+      if (rowNum === 1) return;
+      const hasData = [1, 2, 3, 4, 5, 6].some((column) => hasCellValue(row.getCell(column).value));
+      if (!hasData) return;
+      const expenseName = String(row.getCell(2).value || "").trim();
+      const expenseId = String(row.getCell(3).value || "").trim();
+      const errorsForRow: string[] = [];
+      if (!expenseName && !expenseId) errorsForRow.push("expense name or ID is required");
+      if (!hasCellValue(row.getCell(4).value) || !Number.isFinite(Number(row.getCell(4).value))) errorsForRow.push("invalid amount");
+      if (!parseDate(row.getCell(5).value)) errorsForRow.push("invalid start date");
+      if (errorsForRow.length > 0) errors.push(`Price Adj row ${rowNum}: ${errorsForRow.join(", ")}`);
+    });
+  }
+
+  const actualSheet = wb.getWorksheet("Actual Spending");
+  if (actualSheet) {
+    actualSheet.eachRow((row, rowNum) => {
+      if (rowNum === 1) return;
+      const hasData = [1, 2, 3, 4, 5, 6, 7].some((column) => hasCellValue(row.getCell(column).value));
+      if (!hasData) return;
+      const errorsForRow: string[] = [];
+      if (!parseDate(row.getCell(2).value)) errorsForRow.push("invalid date");
+      if (!hasCellValue(row.getCell(3).value) || !Number.isFinite(Number(row.getCell(3).value))) errorsForRow.push("invalid amount");
+      if (errorsForRow.length > 0) errors.push(`Actual row ${rowNum}: ${errorsForRow.join(", ")}`);
+    });
+  }
+
+  const categorySheet = wb.getWorksheet("Category Colors");
+  if (categorySheet) {
+    categorySheet.eachRow((row, rowNum) => {
+      if (rowNum === 1) return;
+      const hasData = [1, 2, 3].some((column) => hasCellValue(row.getCell(column).value));
+      if (!hasData) return;
+      const name = String(row.getCell(1).value || "").trim();
+      const color = String(row.getCell(2).value || "").trim();
+      const errorsForRow: string[] = [];
+      if (!name) errorsForRow.push("name is required");
+      if (color && !/^#?[0-9a-f]{6}$/i.test(color)) errorsForRow.push("invalid color");
+      if (errorsForRow.length > 0) errors.push(`Category row ${rowNum}: ${errorsForRow.join(", ")}`);
+    });
+  }
+
+  if (errors.length > 0) throw new SpreadsheetValidationError(errors.join("; "));
+}
+
 // ─── EXPORT ──────────────────────────────────────────────────────────────────
 
-router.get("/export", async (req, res) => {
+router.get("/export", async (req: Request<{ accountId: string }>, res) => {
   try {
     const { accountId } = req.params;
     const account = await prisma.account.findUnique({ where: { id: accountId } });
@@ -483,7 +621,7 @@ router.get("/export", async (req, res) => {
 
 // ─── IMPORT ──────────────────────────────────────────────────────────────────
 
-router.post("/import", upload.single("file"), async (req, res) => {
+router.post("/import", upload.single("file"), async (req: Request<{ accountId: string }>, res) => {
   try {
     const { accountId } = req.params;
     if (!req.file) {
@@ -493,6 +631,10 @@ router.post("/import", upload.single("file"), async (req, res) => {
 
     const wb = new ExcelJS.Workbook();
     await wb.xlsx.load(req.file.buffer as unknown as ArrayBuffer);
+
+    const incomeSheet = wb.getWorksheet("Income Sources");
+    const expenseSheet = wb.getWorksheet("Planned Expenses");
+    validateWorkbook(wb);
 
     const results = {
       balance: { updated: false },
@@ -504,6 +646,13 @@ router.post("/import", upload.single("file"), async (req, res) => {
       errors: [] as string[],
     };
 
+    await prisma.$transaction(async (tx) => {
+      const db = tx;
+
+      if (results.errors.length > 0) {
+        throw new SpreadsheetValidationError(results.errors.join("; "));
+      }
+
     // ═══ Balance ═════════════════════════════════════════════════════════════
 
     const balSheet = wb.getWorksheet("Balance");
@@ -512,7 +661,7 @@ router.post("/import", upload.single("file"), async (req, res) => {
       const amount = Number(row.getCell(1).value);
       const balDate = parseDate(row.getCell(2).value);
       if (!isNaN(amount)) {
-        await prisma.balanceSnapshot.create({
+        await db.balanceSnapshot.create({
           data: { amount, date: balDate ? new Date(balDate) : new Date(), accountId },
         });
         results.balance.updated = true;
@@ -521,10 +670,10 @@ router.post("/import", upload.single("file"), async (req, res) => {
 
     // ═══ Income Sources ══════════════════════════════════════════════════════
 
-    const incSheet = wb.getWorksheet("Income Sources");
+    const incSheet = incomeSheet;
     if (incSheet) {
       const existingIds = new Set(
-        (await prisma.incomeSource.findMany({ where: { accountId }, select: { id: true } })).map((i) => i.id)
+        (await db.incomeSource.findMany({ where: { accountId }, select: { id: true } })).map((i) => i.id)
       );
       const seenIds = new Set<string>();
       const incomeOps: Promise<void>[] = [];
@@ -541,55 +690,42 @@ router.post("/import", upload.single("file"), async (req, res) => {
         const startDate = parseDate(row.getCell(5).value);
         const active = parseBool(row.getCell(6).value);
 
-        if (isNaN(amount)) {
-          results.errors.push(`Income row ${rowNum}: invalid amount`);
-          return;
-        }
-        if (!VALID_INTERVALS.includes(interval)) {
-          results.errors.push(`Income row ${rowNum}: invalid interval "${interval}"`);
-          return;
-        }
-        if (!startDate) {
-          results.errors.push(`Income row ${rowNum}: invalid start date`);
-          return;
-        }
-
-        const data = { name, amount, interval, startDate: new Date(startDate), active, accountId };
+        const data = { name, amount, interval, startDate: new Date(startDate!), active, accountId };
 
         if (id && existingIds.has(id)) {
           seenIds.add(id);
           incomeOps.push(
-            prisma.incomeSource.update({ where: { id }, data }).then(() => { results.income.updated++; })
+            db.incomeSource.update({ where: { id }, data }).then(() => { results.income.updated++; })
           );
         } else {
           incomeOps.push(
-            prisma.incomeSource.create({ data }).then(() => { results.income.created++; })
+            db.incomeSource.create({ data }).then(() => { results.income.created++; })
           );
         }
       });
 
-      const incToDelete = [...existingIds].filter((id) => !seenIds.has(id));
-      if (incToDelete.length > 0) {
-        await prisma.incomeSource.deleteMany({ where: { id: { in: incToDelete }, accountId } });
-        results.income.deleted = incToDelete.length;
-      }
-
       await Promise.all(incomeOps);
+
+      const incToArchive = [...existingIds].filter((id) => !seenIds.has(id));
+      if (incToArchive.length > 0) {
+        await archiveIncomeSources(db, incToArchive, accountId);
+        results.income.deleted = incToArchive.length;
+      }
     }
 
     // ═══ Planned Expenses ════════════════════════════════════════════════════
 
-    const expSheet = wb.getWorksheet("Planned Expenses");
+    const expSheet = expenseSheet;
     if (expSheet) {
       const existingIds = new Set(
-        (await prisma.plannedExpense.findMany({ where: { accountId }, select: { id: true } })).map((e) => e.id)
+        (await db.plannedExpense.findMany({ where: { accountId }, select: { id: true } })).map((e) => e.id)
       );
       const seenIds = new Set<string>();
       const expenseOps: Promise<void>[] = [];
 
       // First pass: find transfer target accounts that need to be created
       const neededAccounts = new Set<string>();
-      let importAccounts = await prisma.account.findMany({ select: { id: true, name: true } });
+      let importAccounts = await db.account.findMany({ select: { id: true, name: true } });
       let accountIdByName = new Map(importAccounts.map((a) => [a.name.toLowerCase(), a.id]));
 
       expSheet.eachRow((row, rowNum) => {
@@ -603,13 +739,13 @@ router.post("/import", upload.single("file"), async (req, res) => {
 
       // Auto-create missing transfer target accounts
       for (const acctName of neededAccounts) {
-        await prisma.account.create({ data: { name: acctName } });
+        await db.account.create({ data: { name: acctName } });
         results.errors.push(`Auto-created account "${acctName}" for transfer target`);
       }
 
       // Refresh account lookup if we created any
       if (neededAccounts.size > 0) {
-        importAccounts = await prisma.account.findMany({ select: { id: true, name: true } });
+        importAccounts = await db.account.findMany({ select: { id: true, name: true } });
         accountIdByName = new Map(importAccounts.map((a) => [a.name.toLowerCase(), a.id]));
       }
 
@@ -631,19 +767,6 @@ router.post("/import", upload.single("file"), async (req, res) => {
         const isTransfer = parseBool(row.getCell(10).value);
         const transferToAccountName = String(row.getCell(11).value || "").trim();
 
-        if (isNaN(amount)) {
-          results.errors.push(`Expense row ${rowNum}: invalid amount`);
-          return;
-        }
-        if (!VALID_INTERVALS.includes(interval)) {
-          results.errors.push(`Expense row ${rowNum}: invalid interval "${interval}"`);
-          return;
-        }
-        if (!startDate) {
-          results.errors.push(`Expense row ${rowNum}: invalid start date`);
-          return;
-        }
-
         let transferToAccountId: string | null = null;
         if (isTransfer && transferToAccountName) {
           const resolved = accountIdByName.get(transferToAccountName.toLowerCase());
@@ -658,7 +781,7 @@ router.post("/import", upload.single("file"), async (req, res) => {
           name,
           amount,
           interval,
-          startDate: new Date(startDate),
+          startDate: new Date(startDate!),
           endDate: endDate ? new Date(endDate) : null,
           active,
           category,
@@ -671,22 +794,22 @@ router.post("/import", upload.single("file"), async (req, res) => {
         if (id && existingIds.has(id)) {
           seenIds.add(id);
           expenseOps.push(
-            prisma.plannedExpense.update({ where: { id }, data }).then(() => { results.expenses.updated++; })
+            db.plannedExpense.update({ where: { id }, data }).then(() => { results.expenses.updated++; })
           );
         } else {
           expenseOps.push(
-            prisma.plannedExpense.create({ data }).then(() => { results.expenses.created++; })
+            db.plannedExpense.create({ data }).then(() => { results.expenses.created++; })
           );
         }
       });
 
-      const expToDelete = [...existingIds].filter((id) => !seenIds.has(id));
-      if (expToDelete.length > 0) {
-        await prisma.plannedExpense.deleteMany({ where: { id: { in: expToDelete }, accountId } });
-        results.expenses.deleted = expToDelete.length;
-      }
-
       await Promise.all(expenseOps);
+
+      const expToArchive = [...existingIds].filter((id) => !seenIds.has(id));
+      if (expToArchive.length > 0) {
+        await archivePlannedExpenses(db, expToArchive, accountId);
+        results.expenses.deleted = expToArchive.length;
+      }
     }
 
     // ═══ Price Adjustments ═══════════════════════════════════════════════════
@@ -694,7 +817,7 @@ router.post("/import", upload.single("file"), async (req, res) => {
     const priceSheet = wb.getWorksheet("Price Adjustments");
     if (priceSheet) {
       // Build a name→id lookup from the current expenses
-      const allExpenses = await prisma.plannedExpense.findMany({
+      const allExpenses = await db.plannedExpense.findMany({
         where: { accountId },
         select: { id: true, name: true },
       });
@@ -702,7 +825,7 @@ router.post("/import", upload.single("file"), async (req, res) => {
       const accountExpenseIds = new Set(allExpenses.map((e) => e.id));
 
       const existingPaIds = new Set(
-        (await prisma.priceAdjustment.findMany({
+        (await db.priceAdjustment.findMany({
           where: { expenseId: { in: [...accountExpenseIds] } },
           select: { id: true },
         })).map((p) => p.id)
@@ -727,41 +850,28 @@ router.post("/import", upload.single("file"), async (req, res) => {
           expenseId = nameToId.get(expenseName.toLowerCase()) || "";
         }
 
-        if (!expenseId) {
-          results.errors.push(`Price Adj row ${rowNum}: cannot find expense "${expenseName}"`);
-          return;
-        }
-        if (isNaN(amount)) {
-          results.errors.push(`Price Adj row ${rowNum}: invalid amount`);
-          return;
-        }
-        if (!startDate) {
-          results.errors.push(`Price Adj row ${rowNum}: invalid start date`);
-          return;
-        }
-
         const data = {
           expenseId,
           amount,
-          startDate: new Date(startDate),
+          startDate: new Date(startDate!),
           note,
         };
 
         if (id && existingPaIds.has(id)) {
           seenPaIds.add(id);
           paOps.push(
-            prisma.priceAdjustment.update({ where: { id }, data }).then(() => { results.priceAdjustments.updated++; })
+            db.priceAdjustment.update({ where: { id }, data }).then(() => { results.priceAdjustments.updated++; })
           );
         } else {
           paOps.push(
-            prisma.priceAdjustment.create({ data }).then(() => { results.priceAdjustments.created++; })
+            db.priceAdjustment.create({ data }).then(() => { results.priceAdjustments.created++; })
           );
         }
       });
 
       const paToDelete = [...existingPaIds].filter((id) => !seenPaIds.has(id));
       if (paToDelete.length > 0) {
-        await prisma.priceAdjustment.deleteMany({ where: { id: { in: paToDelete } } });
+        await db.priceAdjustment.deleteMany({ where: { id: { in: paToDelete } } });
         results.priceAdjustments.deleted = paToDelete.length;
       }
 
@@ -773,13 +883,13 @@ router.post("/import", upload.single("file"), async (req, res) => {
     const actSheetImport = wb.getWorksheet("Actual Spending");
     if (actSheetImport) {
       const existingActIds = new Set(
-        (await prisma.actualSpend.findMany({ where: { accountId }, select: { id: true } })).map((a) => a.id)
+        (await db.actualSpend.findMany({ where: { accountId }, select: { id: true } })).map((a) => a.id)
       );
       const seenActIds = new Set<string>();
       const actOps: Promise<void>[] = [];
 
       // Build expense name→id lookup for linking
-      const expensesForLookup = await prisma.plannedExpense.findMany({
+      const expensesForLookup = await db.plannedExpense.findMany({
         where: { accountId },
         select: { id: true, name: true },
       });
@@ -791,12 +901,6 @@ router.post("/import", upload.single("file"), async (req, res) => {
 
         const date = parseDate(row.getCell(2).value);
         const amount = Number(row.getCell(3).value);
-        if (!date || isNaN(amount)) {
-          if (String(row.getCell(2).value || "").trim() || String(row.getCell(3).value || "").trim()) {
-            results.errors.push(`Actual row ${rowNum}: invalid date or amount`);
-          }
-          return;
-        }
 
         const id = String(row.getCell(1).value || "").trim();
         const note = String(row.getCell(4).value || "").trim() || null;
@@ -819,7 +923,7 @@ router.post("/import", upload.single("file"), async (req, res) => {
         }
 
         const data = {
-          date: new Date(date),
+          date: new Date(date!),
           amount,
           note,
           category,
@@ -830,18 +934,18 @@ router.post("/import", upload.single("file"), async (req, res) => {
         if (id && existingActIds.has(id)) {
           seenActIds.add(id);
           actOps.push(
-            prisma.actualSpend.update({ where: { id }, data }).then(() => { results.actualSpends.updated++; })
+            db.actualSpend.update({ where: { id }, data }).then(() => { results.actualSpends.updated++; })
           );
         } else {
           actOps.push(
-            prisma.actualSpend.create({ data }).then(() => { results.actualSpends.created++; })
+            db.actualSpend.create({ data }).then(() => { results.actualSpends.created++; })
           );
         }
       });
 
       const actToDelete = [...existingActIds].filter((id) => !seenActIds.has(id));
       if (actToDelete.length > 0) {
-        await prisma.actualSpend.deleteMany({ where: { id: { in: actToDelete }, accountId } });
+        await db.actualSpend.deleteMany({ where: { id: { in: actToDelete }, accountId } });
         results.actualSpends.deleted = actToDelete.length;
       }
 
@@ -854,10 +958,8 @@ router.post("/import", upload.single("file"), async (req, res) => {
     if (catSheet) {
       catSheet.eachRow((row, rowNum) => {
         if (rowNum === 1) return;
-
         const name = String(row.getCell(1).value || "").trim();
         if (!name) return;
-
         let color = String(row.getCell(2).value || "").trim();
         if (!color) color = "#ef4444";
         if (!color.startsWith("#")) color = "#" + color;
@@ -874,7 +976,7 @@ router.post("/import", upload.single("file"), async (req, res) => {
         const description = String(row.getCell(3).value || "").trim();
 
         catOps.push(
-          prisma.categoryColor.upsert({
+          db.categoryColor.upsert({
             where: { name },
             create: { name, color, description },
             update: { color, description },
@@ -885,11 +987,17 @@ router.post("/import", upload.single("file"), async (req, res) => {
       await Promise.all(catOps);
     }
 
+    });
+
     res.json({
       message: "Import completed successfully",
       results,
     });
   } catch (err) {
+    if (err instanceof SpreadsheetValidationError) {
+      res.status(400).json({ error: err.message });
+      return;
+    }
     console.error("Import error:", err);
     res.status(500).json({ error: "Failed to import spreadsheet" });
   }
