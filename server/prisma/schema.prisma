@@ -17,17 +17,41 @@ enum Interval {
   YEARLY
 }
 
+enum OccurrenceType {
+  INCOME
+  EXPENSE
+}
+
+enum OccurrenceStatus {
+  PLANNED
+  COMPLETED
+  SKIPPED
+  CANCELLED
+}
+
+enum TransactionType {
+  INCOME
+  EXPENSE
+}
+
+enum TransactionOrigin {
+  MANUAL
+  AUTOMATIC
+}
+
 model Account {
   id        String   @id @default(uuid())
   name      String
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  balanceSnapshots  BalanceSnapshot[]
-  incomeSources     IncomeSource[]
-  plannedExpenses   PlannedExpense[]
-  incomingTransfers PlannedExpense[] @relation("TransferTarget")
-  actualSpends      ActualSpend[]
+  balanceSnapshots   BalanceSnapshot[]
+  incomeSources      IncomeSource[]
+  plannedExpenses    PlannedExpense[]
+  incomingTransfers  PlannedExpense[]    @relation("TransferTarget")
+  actualSpends       ActualSpend[]
+  occurrences        Occurrence[]
+  actualTransactions ActualTransaction[]
 }
 
 model BalanceSnapshot {
@@ -53,7 +77,10 @@ model IncomeSource {
   account   Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
   accountId String
 
+  occurrences Occurrence[]
+
   @@index([accountId])
+  @@unique([accountId, id])
 }
 
 model PlannedExpense {
@@ -75,9 +102,11 @@ model PlannedExpense {
   updatedAt           DateTime          @updatedAt
   account             Account           @relation(fields: [accountId], references: [id], onDelete: Cascade)
   accountId           String
+  occurrences         Occurrence[]
 
   @@index([accountId])
   @@index([transferToAccountId])
+  @@unique([accountId, id])
 }
 
 model PriceAdjustment {
@@ -114,4 +143,55 @@ model CategoryColor {
   name        String @id
   color       String @default("#ef4444")
   description String @default("")
+}
+
+model Occurrence {
+  id                String             @id @default(uuid())
+  account           Account            @relation(fields: [accountId], references: [id], onDelete: NoAction)
+  accountId         String
+  type              OccurrenceType
+  status            OccurrenceStatus   @default(PLANNED)
+  incomeSource      IncomeSource?      @relation(fields: [accountId, incomeSourceId], references: [accountId, id], onDelete: NoAction)
+  incomeSourceId    String?
+  plannedExpense    PlannedExpense?    @relation(fields: [accountId, plannedExpenseId], references: [accountId, id], onDelete: NoAction)
+  plannedExpenseId  String?
+  anchorDate        DateTime           @db.Date
+  dueDate           DateTime           @db.Date
+  plannedAmount     Decimal            @db.Decimal(18, 2)
+  effectiveAmount   Decimal            @db.Decimal(18, 2)
+  identityKey       String             @unique
+  nameSnapshot      String
+  categorySnapshot  String?
+  originalRuleId    String
+  createdAt         DateTime           @default(now())
+  statusChangedAt   DateTime           @default(now())
+  actualTransaction ActualTransaction?
+
+  @@index([accountId, dueDate])
+  @@index([incomeSourceId])
+  @@index([plannedExpenseId])
+  @@index([status, dueDate])
+  @@unique([accountId, id])
+}
+
+model ActualTransaction {
+  id           String            @id @default(uuid())
+  account      Account           @relation(fields: [accountId], references: [id], onDelete: NoAction)
+  accountId    String
+  type         TransactionType
+  origin       TransactionOrigin
+  occurredAt   DateTime
+  amount       Decimal           @db.Decimal(18, 2)
+  note         String?
+  category     String?
+  occurrence   Occurrence?       @relation(fields: [accountId, occurrenceId], references: [accountId, id], onDelete: NoAction)
+  occurrenceId String?           @unique
+  deletedAt    DateTime?
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
+
+  @@index([accountId, occurredAt])
+  @@index([accountId, deletedAt])
+  @@index([origin])
+  @@unique([accountId, occurrenceId])
 }
