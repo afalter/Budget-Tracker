@@ -388,12 +388,20 @@ cp .env.example .env
 
 The defaults work out of the box for local development. **For any shared or production deployment, change the database credentials to strong, unique values.**
 
+For local Vite development, an additional hostname can optionally be allowed by
+adding `VITE_ALLOWED_HOST` to the root `.env` (the same file used by Docker
+Compose). Use the hostname only, without `https://` or a path. Compose passes the
+value to the client container at startup. If it is unset or empty, Vite keeps its
+safe default local-development hosts. The root `.env.example` documents the variable
+without containing a private hostname.
+
 | Variable            | Default                                          | Description            |
 |---------------------|--------------------------------------------------|------------------------|
 | `DATABASE_URL`      | `postgresql://budget:budget@db:5432/budget_tracker` | Prisma connection string |
 | `POSTGRES_USER`     | `budget`                                         | PostgreSQL username    |
 | `POSTGRES_PASSWORD` | `budget`                                         | PostgreSQL password    |
 | `POSTGRES_DB`       | `budget_tracker`                                 | PostgreSQL database name |
+| `VITE_ALLOWED_HOST` | *(unset)*                                        | Optional additional hostname for the Vite development server |
 
 ---
 

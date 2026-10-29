@@ -41,6 +41,8 @@ services:
     build:
       context: .
       dockerfile: client/Dockerfile
+    environment:
+      VITE_ALLOWED_HOST: ${VITE_ALLOWED_HOST:-}
     ports:
       - "5173:5173"
     depends_on:
