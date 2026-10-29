@@ -1,5 +1,7 @@
 import { Router, Request, Response } from "express";
 import prisma from "../lib/prisma";
+import { processDueOccurrencesForAccount } from "../lib/occurrenceProcessing";
+import { calculateCurrentBalance } from "./projections";
 
 const router = Router({ mergeParams: true });
 
@@ -7,9 +9,19 @@ const router = Router({ mergeParams: true });
 router.get("/", async (req: Request, res: Response) => {
   try {
     const { accountId } = req.params;
+    try {
+      await processDueOccurrencesForAccount(prisma, accountId);
+    } catch (error) {
+      console.error("Failed to process due occurrences:", error);
+      res.status(503).json({
+        code: "OCCURRENCE_PROCESSING_FAILED",
+        error: "Failed to process due occurrences",
+      });
+      return;
+    }
     const snapshot = await prisma.balanceSnapshot.findFirst({
       where: { accountId },
-      orderBy: { date: "desc" },
+      orderBy: [{ date: "desc" }, { createdAt: "desc" }],
     });
 
     if (!snapshot) {
@@ -17,7 +29,32 @@ router.get("/", async (req: Request, res: Response) => {
       return;
     }
 
-    res.json(snapshot);
+    const today = new Date();
+    const todayUTC = new Date(Date.UTC(
+      today.getUTCFullYear(),
+      today.getUTCMonth(),
+      today.getUTCDate(),
+    ));
+    const amount = await calculateCurrentBalance(prisma, accountId, snapshot, todayUTC);
+    const snapshotDate = new Date(Date.UTC(
+      snapshot.date.getUTCFullYear(),
+      snapshot.date.getUTCMonth(),
+      snapshot.date.getUTCDate(),
+    ));
+    const actualSpends = await prisma.actualSpend.findMany({
+      where: {
+        accountId,
+        date: { lte: todayUTC },
+        OR: [
+          { date: { gt: snapshotDate } },
+          { date: snapshotDate, createdAt: { gt: snapshot.createdAt } },
+        ],
+      },
+      select: { amount: true },
+    });
+    const actualSpendAmount = actualSpends.reduce((total, actual) => total + actual.amount, 0);
+
+    res.json({ ...snapshot, amount: amount - actualSpendAmount });
   } catch (error) {
     console.error("Failed to fetch balance:", error);
     res.status(500).json({ error: "Failed to fetch balance" });

@@ -1,5 +1,6 @@
 import { Router, Request, Response } from "express";
 import prisma from "../lib/prisma";
+import { archivePlannedExpenses } from "../lib/archiveRules";
 
 const router = Router({ mergeParams: true });
 
@@ -121,16 +122,17 @@ router.put("/:id", async (req: Request, res: Response) => {
 router.delete("/:id", async (req: Request, res: Response) => {
   try {
     const { accountId, id } = req.params;
-    const existing = await prisma.plannedExpense.findFirst({
-      where: { id, accountId },
+    await prisma.$transaction(async (tx) => {
+      const existing = await tx.plannedExpense.findFirst({ where: { id, accountId } });
+      if (!existing) throw new Error("Expense not found");
+      await archivePlannedExpenses(tx, [id], accountId);
     });
-    if (!existing) {
-      res.status(404).json({ error: "Expense not found" });
-      return;
-    }
-    await prisma.plannedExpense.delete({ where: { id } });
     res.status(204).send();
   } catch (error) {
+    if (error instanceof Error && error.message === "Expense not found") {
+      res.status(404).json({ error: error.message });
+      return;
+    }
     console.error("Failed to delete expense:", error);
     res.status(500).json({ error: "Failed to delete expense" });
   }
