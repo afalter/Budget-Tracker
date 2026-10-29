@@ -71,6 +71,32 @@ export default function LedgerView({ accountId, projections, dateRange, loading,
     onRefresh();
   }
 
+  const visibleEvents = useMemo(() => {
+    const coveredForecastIds = new Set(
+      projections.flatMap((day) =>
+        day.events
+          .filter((event) => event.isActual && event.forecastExpenseId)
+          .map((event) => event.forecastExpenseId!)
+      )
+    );
+    const coveredIncomeIds = new Set(
+      projections.flatMap((day) =>
+        day.events
+          .filter((event) => event.isActual && event.incomeSourceId)
+          .map((event) => event.incomeSourceId!)
+      )
+    );
+
+    return projections.map((day) => ({
+      ...day,
+      events: day.events.filter((event) =>
+        event.isActual ||
+        !(event.forecastExpenseId && coveredForecastIds.has(event.forecastExpenseId)) &&
+        !(event.incomeSourceId && coveredIncomeIds.has(event.incomeSourceId))
+      ),
+    }));
+  }, [projections]);
+
   const ledgerRows = useMemo(() => {
     const rows: {
       date: string;
@@ -82,7 +108,7 @@ export default function LedgerView({ accountId, projections, dateRange, loading,
       id?: string;
     }[] = [];
 
-    for (const day of projections) {
+    for (const day of visibleEvents) {
       if (day.events.length === 0) {
         if (filter === "all") {
           rows.push({
@@ -121,7 +147,7 @@ export default function LedgerView({ accountId, projections, dateRange, loading,
     }
 
     return rows;
-  }, [projections, filter, search]);
+  }, [visibleEvents, filter, search]);
 
   const summary = useMemo(() => {
     let totalIncome = 0;
@@ -129,7 +155,7 @@ export default function LedgerView({ accountId, projections, dateRange, loading,
     let incomeCount = 0;
     let expenseCount = 0;
 
-    for (const day of projections) {
+    for (const day of visibleEvents) {
       for (const event of day.events) {
         if (event.type === "income") {
           totalIncome += event.amount;
@@ -150,7 +176,7 @@ export default function LedgerView({ accountId, projections, dateRange, loading,
       startBalance: projections[0]?.balance ?? 0,
       endBalance: projections[projections.length - 1]?.balance ?? 0,
     };
-  }, [projections]);
+  }, [visibleEvents, projections]);
 
   return (
     <div className="card bg-base-100 shadow-xl">

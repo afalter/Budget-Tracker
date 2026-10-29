@@ -230,6 +230,79 @@ describe("calculateCurrentBalance", () => {
     expect(projection.events).toEqual([]);
   });
 
+  it("replaces a completed income forecast with its actual transaction", () => {
+    const today = date("2026-10-27");
+    const projection = applyDay(today, 1000, [
+      { id: "income-source", interval: "ONE_TIME", startDate: today, active: true, name: "Income", amount: 100 },
+    ], [], [], [], new Set(), [{
+      id: "actual-income",
+      type: "INCOME",
+      amount: 100,
+      name: "Income",
+      category: null,
+      affectsBalance: true,
+      incomeSourceId: "income-source",
+    }]);
+
+    expect(projection.events).toEqual([{
+      id: "actual-income",
+      type: "income",
+      name: "Income",
+      amount: 100,
+      isActual: true,
+      incomeSourceId: "income-source",
+    }]);
+    expect(projection.balance).toBe(1100);
+  });
+
+  it("keeps an income forecast without an actual", () => {
+    const today = date("2026-10-27");
+    const projection = applyDay(today, 1000, [
+      { id: "income-source", interval: "ONE_TIME", startDate: today, active: true, name: "Income", amount: 100 },
+    ], [], [], []);
+
+    expect(projection.events).toEqual([{
+      type: "income",
+      name: "Income",
+      amount: 100,
+      incomeSourceId: "income-source",
+    }]);
+  });
+
+  it("only replaces the fulfilled income forecast when multiple forecasts share a day", () => {
+    const today = date("2026-10-27");
+    const projection = applyDay(today, 1000, [
+      { id: "fulfilled-income", interval: "ONE_TIME", startDate: today, active: true, name: "Fulfilled", amount: 100 },
+      { id: "other-income", interval: "ONE_TIME", startDate: today, active: true, name: "Other", amount: 40 },
+    ], [], [], [], new Set(), [{
+      id: "actual-income",
+      type: "INCOME",
+      amount: 100,
+      name: "Fulfilled",
+      category: null,
+      affectsBalance: true,
+      incomeSourceId: "fulfilled-income",
+    }]);
+
+    expect(projection.events).toEqual([
+      {
+        type: "income",
+        name: "Other",
+        amount: 40,
+        incomeSourceId: "other-income",
+      },
+      {
+        id: "actual-income",
+        type: "income",
+        name: "Fulfilled",
+        amount: 100,
+        isActual: true,
+        incomeSourceId: "fulfilled-income",
+      },
+    ]);
+    expect(projection.balance).toBe(1140);
+  });
+
   it("does not cover another planned expense on the same day", async () => {
     const today = date("2026-10-27");
     const expense = await prisma.plannedExpense.create({
@@ -255,7 +328,7 @@ describe("calculateCurrentBalance", () => {
     ], [], [], new Set([expense.id]));
 
     expect(projection.balance).toBe(860);
-    expect(projection.events).toEqual([{ type: "expense", name: "Other", amount: 40 }]);
+    expect(projection.events).toEqual([{ type: "expense", name: "Other", amount: 40, forecastExpenseId: other.id }]);
   });
 
   it.each(["SKIPPED", "CANCELLED"] as const)("does not cover an expense for a %s occurrence", async (status) => {
@@ -277,7 +350,7 @@ describe("calculateCurrentBalance", () => {
     const projection = applyDay(today, 1000, [], [{ ...expense, category: expense.category, priceAdjustments: [] }], [], []);
 
     expect(projection.balance).toBe(900);
-    expect(projection.events).toEqual([{ type: "expense", name: "Not covered", amount: 100 }]);
+    expect(projection.events).toEqual([{ type: "expense", name: "Not covered", amount: 100, forecastExpenseId: expense.id }]);
   });
 
   it("does not cover a planned expense for a soft-deleted transaction", async () => {
@@ -299,7 +372,7 @@ describe("calculateCurrentBalance", () => {
     const projection = applyDay(today, 1000, [], [{ ...expense, category: expense.category, priceAdjustments: [] }], [], []);
 
     expect(projection.balance).toBe(900);
-    expect(projection.events).toEqual([{ type: "expense", name: "Deleted actual", amount: 100 }]);
+    expect(projection.events).toEqual([{ type: "expense", name: "Deleted actual", amount: 100, forecastExpenseId: expense.id }]);
   });
 
   it("does not display or apply a soft-deleted actual transaction", async () => {
@@ -326,7 +399,7 @@ describe("calculateCurrentBalance", () => {
     const projection = applyDay(today, 1000, [], [{ ...expense, category: expense.category, priceAdjustments: [] }], [], [], projectionData.coveredExpensesByDate.get("2026-10-27"), projectionData.actualTransactionsByDate.get("2026-10-27"));
 
     expect(projection.balance).toBe(900);
-    expect(projection.events).toEqual([{ type: "expense", name: "Terminal occurrence", amount: 100 }]);
+    expect(projection.events).toEqual([{ type: "expense", name: "Terminal occurrence", amount: 100, forecastExpenseId: expense.id }]);
   });
 
   it("shows a completed actual transaction on its due date without applying it twice", async () => {
@@ -341,7 +414,12 @@ describe("calculateCurrentBalance", () => {
     const projection = applyDay(today, 900, [], [{ ...expense, category: expense.category, priceAdjustments: [] }], [], [], projectionData.coveredExpensesByDate.get("2026-10-27"), projectionData.actualTransactionsByDate.get("2026-10-27"));
 
     expect(projection.balance).toBe(900);
-    expect(projection.events).toEqual([{ type: "expense", name: "Same-day actual", amount: 100, isActual: true }]);
+    expect(projection.events).toEqual([{
+      type: "expense",
+      name: "Same-day actual",
+      amount: 100,
+      isActual: true,
+    }]);
   });
 
   it("documents the current behavior when occurredAt differs from dueDate", async () => {

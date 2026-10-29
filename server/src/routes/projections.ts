@@ -13,6 +13,8 @@ interface ProjectionEvent {
   amount: number;
   category?: string;
   isActual?: boolean;
+  forecastExpenseId?: string;
+  incomeSourceId?: string;
   isTransfer?: boolean;
 }
 
@@ -56,6 +58,8 @@ interface ActualTransactionForDay {
   name: string;
   category: string | null;
   affectsBalance: boolean;
+  forecastExpenseId?: string;
+  incomeSourceId?: string;
 }
 
 interface MaterializedActualTransaction {
@@ -72,6 +76,7 @@ interface MaterializedActualTransaction {
     plannedExpenseId: string | null;
     nameSnapshot: string;
     categorySnapshot: string | null;
+    incomeSourceId?: string | null;
   } | null;
 }
 
@@ -100,7 +105,10 @@ export function buildActualTransactionProjectionData(
         ? occurredDateKey >= balanceStartKey
         : occurredDateKey > balanceStartKey,
     };
-      if (transaction.id) actualEvent.id = transaction.id;
+    if (transaction.id) actualEvent.id = transaction.id;
+    if (transaction.occurrence?.incomeSourceId) {
+      actualEvent.incomeSourceId = transaction.occurrence.incomeSourceId;
+    }
     const events = actualTransactionsByDate.get(occurredDateKey);
     if (events) events.push(actualEvent);
     else actualTransactionsByDate.set(occurredDateKey, [actualEvent]);
@@ -168,7 +176,7 @@ export function isHistoricalWindow(windowStart: Date, todayUTC: Date): boolean {
 export function applyDay(
   currentDate: Date,
   runningBalance: number,
-  effectiveIncome: { interval: Interval; startDate: Date; active: boolean; name: string; amount: number }[],
+  effectiveIncome: { id?: string; interval: Interval; startDate: Date; active: boolean; name: string; amount: number }[],
   effectiveExpenses: ItemWithAdjustments[],
   incomingTransfers: ItemWithAdjustments[],
   actualsForDay: ActualForDay[],
@@ -177,12 +185,20 @@ export function applyDay(
 ): { balance: number; events: ProjectionEvent[] } {
   const events: ProjectionEvent[] = [];
   let balance = runningBalance;
+  const coveredIncomeSourceIds = new Set(
+    actualTransactionsForDay
+      .filter((actual) => actual.type === "INCOME" && actual.incomeSourceId)
+      .map((actual) => actual.incomeSourceId!)
+  );
 
   // Regular income
   for (const source of effectiveIncome) {
     if (!source.active) continue;
+    if (source.id && coveredIncomeSourceIds.has(source.id)) continue;
     if (matchesInterval(source.interval, source.startDate, currentDate)) {
-      events.push({ type: "income", name: source.name, amount: source.amount });
+      const event: ProjectionEvent = { type: "income", name: source.name, amount: source.amount };
+      if (source.id) event.incomeSourceId = source.id;
+      events.push(event);
       balance += source.amount;
     }
   }
@@ -216,6 +232,7 @@ export function applyDay(
       amount: actual.amount,
       isActual: true,
     };
+    if (actual.forecastExpenseId) event.forecastExpenseId = actual.forecastExpenseId;
     if (actual.category) event.category = actual.category;
     events.push(event);
     balance -= actual.amount;
@@ -225,12 +242,13 @@ export function applyDay(
   // Transactions through today are already included in the start balance.
   for (const actual of actualTransactionsForDay) {
     const event: ProjectionEvent = {
-      id: actual.id,
       type: actual.type === "INCOME" ? "income" : "expense",
       name: actual.name,
       amount: actual.amount,
       isActual: true,
     };
+    if (actual.id) event.id = actual.id;
+    if (actual.incomeSourceId) event.incomeSourceId = actual.incomeSourceId;
     if (actual.category) event.category = actual.category;
     events.push(event);
     if (actual.affectsBalance) {
@@ -247,7 +265,12 @@ export function applyDay(
     if (matchesInterval(expense.interval, expense.startDate, currentDate)) {
       if (coveredForecastIds.has(expense.id) || coveredExpenseIds.has(expense.id)) continue;
       const amount = getEffectiveAmount(expense, currentDate);
-      const event: ProjectionEvent = { type: "expense", name: expense.name, amount };
+      const event: ProjectionEvent = {
+        type: "expense",
+        name: expense.name,
+        amount,
+        forecastExpenseId: expense.id,
+      };
       if (expense.category) event.category = expense.category;
       if (expense.isTransfer) event.isTransfer = true;
       events.push(event);
@@ -376,6 +399,7 @@ router.get("/", async (req: Request, res: Response) => {
             plannedExpenseId: true,
             nameSnapshot: true,
             categorySnapshot: true,
+            incomeSourceId: true,
           },
         },
       },

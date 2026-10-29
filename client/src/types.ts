@@ -83,6 +83,8 @@ export interface ProjectionEvent {
   type: "income" | "expense";
   category?: string;
   isActual?: boolean;
+  forecastExpenseId?: string;
+  incomeSourceId?: string;
   isTransfer?: boolean;
 }
 
