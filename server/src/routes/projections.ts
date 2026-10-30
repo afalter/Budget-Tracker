@@ -137,20 +137,32 @@ export async function calculateBalanceAt(
   ));
   const fromDate = new Date(snapshotDate);
   fromDate.setUTCDate(fromDate.getUTCDate() + 1);
-  const transactions = await db.actualTransaction.findMany({
-    where: {
-      accountId,
-      deletedAt: null,
-      occurredAt: { gte: fromDate, lt: throughExclusive },
-    },
-    select: { type: true, amount: true },
-  });
+  const [transactions, actualSpends] = await Promise.all([
+    db.actualTransaction.findMany({
+      where: {
+        accountId,
+        deletedAt: null,
+        occurredAt: { gte: fromDate, lt: throughExclusive },
+      },
+      select: { type: true, amount: true },
+    }),
+    db.actualSpend.findMany({
+      where: {
+        accountId,
+        date: { gte: fromDate, lt: throughExclusive },
+      },
+      select: { amount: true },
+    }),
+  ]);
 
   let balance = new Prisma.Decimal(snapshot.amount);
   for (const transaction of transactions) {
     balance = transaction.type === "INCOME"
       ? balance.add(transaction.amount)
       : balance.sub(transaction.amount);
+  }
+  for (const actualSpend of actualSpends) {
+    balance = balance.sub(actualSpend.amount);
   }
   return balance.toNumber();
 }

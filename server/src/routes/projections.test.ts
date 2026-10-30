@@ -10,6 +10,7 @@ const date = (value: string) => new Date(`${value}T00:00:00Z`);
 describe("calculateCurrentBalance", () => {
   beforeAll(async () => {
     await prisma.actualTransaction.deleteMany({ where: { accountId } });
+    await prisma.actualSpend.deleteMany({ where: { accountId } });
     await prisma.occurrence.deleteMany({ where: { accountId } });
     await prisma.balanceSnapshot.deleteMany({ where: { accountId } });
     await prisma.plannedExpense.deleteMany({ where: { accountId } });
@@ -19,6 +20,7 @@ describe("calculateCurrentBalance", () => {
 
   beforeEach(async () => {
     await prisma.actualTransaction.deleteMany({ where: { accountId } });
+    await prisma.actualSpend.deleteMany({ where: { accountId } });
     await prisma.occurrence.deleteMany({ where: { accountId } });
     await prisma.balanceSnapshot.deleteMany({ where: { accountId } });
     await prisma.plannedExpense.deleteMany({ where: { accountId } });
@@ -26,6 +28,7 @@ describe("calculateCurrentBalance", () => {
 
   afterAll(async () => {
     await prisma.actualTransaction.deleteMany({ where: { accountId } });
+    await prisma.actualSpend.deleteMany({ where: { accountId } });
     await prisma.occurrence.deleteMany({ where: { accountId } });
     await prisma.balanceSnapshot.deleteMany({ where: { accountId } });
     await prisma.plannedExpense.deleteMany({ where: { accountId } });
@@ -75,6 +78,17 @@ describe("calculateCurrentBalance", () => {
     await expect(calculateCurrentBalance(prisma, accountId, snapshot, date("2026-10-27"))).resolves.toBe(577);
   });
 
+  it("includes actual spends exactly once in the current balance", async () => {
+    const snapshot = await prisma.balanceSnapshot.create({
+      data: { accountId, amount: 627.74, date: date("2026-10-27") },
+    });
+    await prisma.actualSpend.create({
+      data: { accountId, amount: 250, date: date("2026-10-28"), note: "Manual expense" },
+    });
+
+    await expect(calculateCurrentBalance(prisma, accountId, snapshot, date("2026-10-30"))).resolves.toBe(377.74);
+  });
+
   it("calculates a historical start balance before the window", async () => {
     const snapshot = await prisma.balanceSnapshot.create({
       data: { accountId, amount: 1000, date: date("2026-10-20") },
@@ -89,6 +103,61 @@ describe("calculateCurrentBalance", () => {
     });
 
     await expect(calculateBalanceAt(prisma, accountId, snapshot, date("2026-10-22"))).resolves.toBe(1050);
+  });
+
+  it("includes an independent actual spend before a historical window without adding a ledger event", async () => {
+    const snapshot = await prisma.balanceSnapshot.create({
+      data: { accountId, amount: 627.74, date: date("2026-10-27") },
+    });
+    await prisma.actualSpend.create({
+      data: { accountId, amount: 250, date: date("2026-10-28"), note: "Manual expense" },
+    });
+
+    await expect(calculateBalanceAt(prisma, accountId, snapshot, date("2026-10-30"))).resolves.toBe(377.74);
+
+    const projection = applyDay(date("2026-10-30"), 377.74, [], [], [], []);
+    expect(projection.events).toEqual([]);
+    expect(projection.balance).toBe(377.74);
+  });
+
+  it("counts a linked actual spend before a historical window exactly once", async () => {
+    const snapshot = await prisma.balanceSnapshot.create({
+      data: { accountId, amount: 1000, date: date("2026-10-27") },
+    });
+    const expense = await prisma.plannedExpense.create({
+      data: {
+        id: `${expenseId}-historical-linked`,
+        accountId,
+        name: "Linked expense",
+        amount: 250,
+        interval: "ONE_TIME",
+        startDate: date("2026-10-28"),
+      },
+    });
+    await prisma.actualSpend.create({
+      data: { accountId, amount: 250, date: date("2026-10-28"), forecastExpenseId: expense.id },
+    });
+
+    await expect(calculateBalanceAt(prisma, accountId, snapshot, date("2026-10-30"))).resolves.toBe(750);
+  });
+
+  it("shows an actual spend inside the display window once and updates the running balance", () => {
+    const projection = applyDay(
+      date("2026-10-30"),
+      627.74,
+      [],
+      [],
+      [],
+      [{ amount: 250, name: "Manual expense", category: null, forecastExpenseId: null }],
+    );
+
+    expect(projection.events).toEqual([{
+      type: "expense",
+      name: "Manual expense",
+      amount: 250,
+      isActual: true,
+    }]);
+    expect(projection.balance).toBe(377.74);
   });
 
   it("uses the latest snapshot not later than a historical window", async () => {

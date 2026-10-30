@@ -36,25 +36,8 @@ router.get("/", async (req: Request, res: Response) => {
       today.getUTCDate(),
     ));
     const amount = await calculateCurrentBalance(prisma, accountId, snapshot, todayUTC);
-    const snapshotDate = new Date(Date.UTC(
-      snapshot.date.getUTCFullYear(),
-      snapshot.date.getUTCMonth(),
-      snapshot.date.getUTCDate(),
-    ));
-    const actualSpends = await prisma.actualSpend.findMany({
-      where: {
-        accountId,
-        date: { lte: todayUTC },
-        OR: [
-          { date: { gt: snapshotDate } },
-          { date: snapshotDate, createdAt: { gt: snapshot.createdAt } },
-        ],
-      },
-      select: { amount: true },
-    });
-    const actualSpendAmount = actualSpends.reduce((total, actual) => total + actual.amount, 0);
 
-    res.json({ ...snapshot, amount: amount - actualSpendAmount });
+    res.json({ ...snapshot, amount });
   } catch (error) {
     console.error("Failed to fetch balance:", error);
     res.status(500).json({ error: "Failed to fetch balance" });
