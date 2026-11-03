@@ -4,6 +4,7 @@ export enum Interval {
   WEEKLY = "WEEKLY",
   BIWEEKLY = "BIWEEKLY",
   MONTHLY = "MONTHLY",
+  BIMONTHLY = "BIMONTHLY",
   QUARTERLY = "QUARTERLY",
   YEARLY = "YEARLY",
 }

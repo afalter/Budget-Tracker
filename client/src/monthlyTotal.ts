@@ -49,7 +49,9 @@ function matchesInterval(interval: Interval, startDate: Date, checkDate: Date): 
     case Interval.BIWEEKLY:
       return diffDays % 14 === 0;
     case Interval.MONTHLY:
-      return checkDate.getDate() === startDate.getDate();
+      return matchesMonthInterval(startDate, checkDate, 1);
+    case Interval.BIMONTHLY:
+      return matchesMonthInterval(startDate, checkDate, 2);
     case Interval.QUARTERLY:
       if (checkDate.getDate() !== startDate.getDate()) return false;
       const monthDiff =
@@ -64,6 +66,21 @@ function matchesInterval(interval: Interval, startDate: Date, checkDate: Date): 
     default:
       return false;
   }
+}
+
+function matchesMonthInterval(startDate: Date, checkDate: Date, monthStep: number): boolean {
+  const monthDiff =
+    (checkDate.getFullYear() - startDate.getFullYear()) * 12 +
+    checkDate.getMonth() -
+    startDate.getMonth();
+  if (monthDiff < 0 || monthDiff % monthStep !== 0) return false;
+
+  const target = new Date(startDate.getFullYear(), startDate.getMonth() + monthDiff, 1);
+  const lastDay = new Date(target.getFullYear(), target.getMonth() + 1, 0).getDate();
+  const targetDay = Math.min(startDate.getDate(), lastDay);
+  return checkDate.getFullYear() === target.getFullYear() &&
+    checkDate.getMonth() === target.getMonth() &&
+    checkDate.getDate() === targetDay;
 }
 
 /**

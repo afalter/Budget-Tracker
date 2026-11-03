@@ -118,6 +118,7 @@ function TopicContent({ topic, onNavigate }: { topic: HelpTopic; onNavigate: (t:
               <tr><td className="font-mono">Weekly</td><td>Every 7 days</td></tr>
               <tr><td className="font-mono">Biweekly</td><td>Every 14 days</td></tr>
               <tr><td className="font-mono">Monthly</td><td>Same day each month</td></tr>
+              <tr><td className="font-mono">Bimonthly</td><td>Every 2 calendar months</td></tr>
               <tr><td className="font-mono">Quarterly</td><td>Every 3 months</td></tr>
               <tr><td className="font-mono">Yearly</td><td>Same date each year</td></tr>
             </tbody>

@@ -338,6 +338,26 @@ describe("calculateCurrentBalance", () => {
     }]);
   });
 
+  it("projects bimonthly income only on matching calendar months", () => {
+    const income = {
+      id: "bimonthly-income",
+      interval: "BIMONTHLY" as const,
+      startDate: date("2026-01-31"),
+      active: true,
+      name: "Bimonthly income",
+      amount: 125,
+    };
+
+    expect(applyDay(date("2026-03-31"), 1000, [income], [], [], []).events).toEqual([{
+      type: "income",
+      name: "Bimonthly income",
+      amount: 125,
+      incomeSourceId: "bimonthly-income",
+    }]);
+    expect(applyDay(date("2026-02-28"), 1000, [income], [], [], []).events).toEqual([]);
+    expect(applyDay(date("2026-05-31"), 1000, [income], [], [], []).balance).toBe(1125);
+  });
+
   it("only replaces the fulfilled income forecast when multiple forecasts share a day", () => {
     const today = date("2026-10-27");
     const projection = applyDay(today, 1000, [

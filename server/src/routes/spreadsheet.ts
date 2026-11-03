@@ -340,7 +340,7 @@ router.get("/export", async (req: Request<{ accountId: string }>, res) => {
       ["─────────────────────────────────────────────────────"],
       ["Dates        YYYY-MM-DD  (e.g., 2026-03-15)"],
       ["Amounts      Numbers only, no currency symbols (e.g., 1500.00)"],
-      ["Intervals    ONE_TIME, DAILY, WEEKLY, BIWEEKLY, MONTHLY, QUARTERLY, or YEARLY"],
+      ["Intervals    ONE_TIME, DAILY, WEEKLY, BIWEEKLY, MONTHLY, BIMONTHLY, QUARTERLY, or YEARLY"],
       ["Active       TRUE or FALSE"],
       ["Is Variable  TRUE or FALSE (variable expenses can have Price Adjustments)"],
       [""],

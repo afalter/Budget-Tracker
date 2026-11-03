@@ -39,6 +39,8 @@ export function getOccurrenceDate(
       return addUtcDays(start, occurrenceIndex * 14);
     case "MONTHLY":
       return clampedMonthDate(year, month + occurrenceIndex, day);
+    case "BIMONTHLY":
+      return clampedMonthDate(year, month + occurrenceIndex * 2, day);
     case "QUARTERLY":
       return clampedMonthDate(year, month + occurrenceIndex * 3, day);
     case "YEARLY": {
@@ -97,6 +99,11 @@ export function matchesInterval(
     case "MONTHLY": {
       const monthDiff = monthsBetween(start, check);
       return getOccurrenceDate(interval, start, monthDiff).getTime() === check.getTime();
+    }
+    case "BIMONTHLY": {
+      const monthDiff = monthsBetween(start, check);
+      return monthDiff % 2 === 0 &&
+        getOccurrenceDate(interval, start, monthDiff / 2).getTime() === check.getTime();
     }
     case "QUARTERLY": {
       const monthDiff = monthsBetween(start, check);

@@ -13,6 +13,7 @@ enum Interval {
   WEEKLY
   BIWEEKLY
   MONTHLY
+  BIMONTHLY
   QUARTERLY
   YEARLY
 }

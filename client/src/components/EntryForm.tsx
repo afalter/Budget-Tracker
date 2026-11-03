@@ -30,6 +30,7 @@ const INTERVAL_OPTIONS: { value: Interval; label: string }[] = [
   { value: Interval.WEEKLY, label: "Weekly" },
   { value: Interval.BIWEEKLY, label: "Biweekly" },
   { value: Interval.MONTHLY, label: "Monthly" },
+  { value: Interval.BIMONTHLY, label: "Bimonthly" },
   { value: Interval.QUARTERLY, label: "Quarterly" },
   { value: Interval.YEARLY, label: "Yearly" },
 ];

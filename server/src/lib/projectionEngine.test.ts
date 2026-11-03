@@ -12,6 +12,7 @@ const Interval = {
   WEEKLY: "WEEKLY",
   BIWEEKLY: "BIWEEKLY",
   MONTHLY: "MONTHLY",
+  BIMONTHLY: "BIMONTHLY",
   QUARTERLY: "QUARTERLY",
   YEARLY: "YEARLY",
 } as const;
@@ -42,6 +43,23 @@ describe("matchesInterval", () => {
 
     expect(matchesInterval(Interval.MONTHLY, start, date("2026-02-15"))).toBe(true);
     expect(matchesInterval(Interval.MONTHLY, start, date("2026-02-14"))).toBe(false);
+  });
+
+  it("matches bimonthly occurrences by calendar month", () => {
+    const start = date("2026-01-15");
+
+    expect(matchesInterval(Interval.BIMONTHLY, start, date("2026-03-15"))).toBe(true);
+    expect(matchesInterval(Interval.BIMONTHLY, start, date("2026-05-15"))).toBe(true);
+    expect(matchesInterval(Interval.BIMONTHLY, start, date("2026-02-15"))).toBe(false);
+    expect(matchesInterval(Interval.BIMONTHLY, start, date("2026-04-15"))).toBe(false);
+    expect(matchesInterval(Interval.BIMONTHLY, start, date("2026-04-16"))).toBe(false);
+  });
+
+  it("does not treat bimonthly as a 60-day interval", () => {
+    const start = date("2026-01-01");
+
+    expect(matchesInterval(Interval.BIMONTHLY, start, date("2026-03-01"))).toBe(true);
+    expect(matchesInterval(Interval.BIMONTHLY, start, date("2026-03-02"))).toBe(false);
   });
 
   it.each([28, 29, 30, 31])("clamps monthly anchor %s consistently", (day) => {
@@ -95,6 +113,19 @@ describe("getOccurrenceDate", () => {
 
     expect(getOccurrenceDate(Interval.MONTHLY, start, 1)).toEqual(date("2026-02-28"));
     expect(getOccurrenceDate(Interval.MONTHLY, start, 2)).toEqual(date("2026-03-31"));
+  });
+
+  it("keeps the original bimonthly anchor across clamped months and years", () => {
+    const start = date("2026-01-31");
+
+    expect(getOccurrenceDate(Interval.BIMONTHLY, start, 1)).toEqual(date("2026-03-31"));
+    expect(getOccurrenceDate(Interval.BIMONTHLY, start, 2)).toEqual(date("2026-05-31"));
+    expect(getOccurrenceDate(Interval.BIMONTHLY, start, 5)).toEqual(date("2026-11-30"));
+    expect(getOccurrenceDate(Interval.BIMONTHLY, start, 6)).toEqual(date("2027-01-31"));
+
+    const novemberStart = date("2026-11-30");
+    expect(getOccurrenceDate(Interval.BIMONTHLY, novemberStart, 1)).toEqual(date("2027-01-30"));
+    expect(getOccurrenceDate(Interval.BIMONTHLY, novemberStart, 2)).toEqual(date("2027-03-30"));
   });
 
   it("clamps monthly anchors to April 30 without drifting", () => {

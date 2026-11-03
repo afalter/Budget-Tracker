@@ -40,6 +40,7 @@ describe("calculateOccurrences", () => {
     ["WEEKLY", "2026-01-15", ["2026-01-01", "2026-01-08", "2026-01-15"]],
     ["BIWEEKLY", "2026-01-29", ["2026-01-01", "2026-01-15", "2026-01-29"]],
     ["MONTHLY", "2026-03-01", ["2026-01-01", "2026-02-01", "2026-03-01"]],
+    ["BIMONTHLY", "2026-07-01", ["2026-01-01", "2026-03-01", "2026-05-01", "2026-07-01"]],
     ["QUARTERLY", "2026-07-01", ["2026-01-01", "2026-04-01", "2026-07-01"]],
     ["YEARLY", "2027-01-01", ["2026-01-01", "2027-01-01"]],
   ] as const)("supports %s", (interval, _lastDate, expected) => {
@@ -76,6 +77,23 @@ describe("calculateOccurrences", () => {
       "2027-04-30",
       "2027-07-31",
       "2027-10-31",
+    ]);
+  });
+
+  it("keeps the original bimonthly anchor after a clamped month", () => {
+    const occurrences = calculateOccurrences(
+      expense({ interval: "BIMONTHLY", startDate: date("2026-01-31") }),
+      date("2026-01-01"),
+      date("2027-01-31")
+    );
+    expect(occurrences.map((item) => item.dueDate.toISOString().slice(0, 10))).toEqual([
+      "2026-01-31",
+      "2026-03-31",
+      "2026-05-31",
+      "2026-07-31",
+      "2026-09-30",
+      "2026-11-30",
+      "2027-01-31",
     ]);
   });
 
@@ -143,6 +161,7 @@ describe("calculateOccurrences", () => {
       income("WEEKLY", "2026-01-01"),
       income("BIWEEKLY", "2026-01-01"),
       income("MONTHLY", "2026-01-31"),
+      income("BIMONTHLY", "2026-01-31"),
       income("QUARTERLY", "2026-10-31"),
       income("YEARLY", "2024-02-29"),
     ];

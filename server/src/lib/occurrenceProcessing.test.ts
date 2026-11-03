@@ -30,8 +30,14 @@ describe("processDueOccurrencesForAccount", () => {
     await prisma.actualTransaction.deleteMany({ where: { accountId } });
     await prisma.occurrence.deleteMany({ where: { accountId } });
     await prisma.balanceSnapshot.deleteMany({ where: { accountId } });
-    await prisma.incomeSource.update({ where: { id: incomeId }, data: { active: true } });
-    await prisma.plannedExpense.update({ where: { id: expenseId }, data: { active: true } });
+    await prisma.incomeSource.update({
+      where: { id: incomeId },
+      data: { active: true, interval: "DAILY", startDate: date("2026-10-25") },
+    });
+    await prisma.plannedExpense.update({
+      where: { id: expenseId },
+      data: { active: true, interval: "DAILY", startDate: date("2026-10-25") },
+    });
   });
 
   afterAll(async () => {
@@ -182,6 +188,27 @@ describe("processDueOccurrencesForAccount", () => {
 
     expect(result?.transactionsCreated).toBe(0);
     await expect(prisma.actualTransaction.count({ where: { accountId } })).resolves.toBe(0);
+  });
+
+  it("processes a due bimonthly occurrence on its calendar date", async () => {
+    await prisma.incomeSource.update({
+      where: { id: incomeId },
+      data: { interval: "BIMONTHLY", startDate: date("2026-01-31") },
+    });
+    await prisma.plannedExpense.update({ where: { id: expenseId }, data: { active: false } });
+    await prisma.balanceSnapshot.create({ data: { accountId, amount: 1000, date: date("2026-01-31") } });
+
+    const result = await processDueOccurrencesForAccount(prisma, accountId, date("2026-03-31"));
+
+    expect(result?.transactionsCreated).toBe(1);
+    await expect(prisma.actualTransaction.findFirst({ where: { accountId } })).resolves.toMatchObject({
+      type: "INCOME",
+      occurredAt: date("2026-03-31"),
+      amount: { toString: expect.any(Function) },
+    });
+    await expect(
+      prisma.actualTransaction.findFirst({ where: { accountId } }).then((transaction) => transaction?.amount.toString())
+    ).resolves.toBe("100");
   });
 
   it("serializes parallel calls and creates one transaction per occurrence", async () => {
