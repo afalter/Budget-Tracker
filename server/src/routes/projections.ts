@@ -80,19 +80,44 @@ interface MaterializedActualTransaction {
   } | null;
 }
 
+interface TerminalOccurrenceForProjection {
+  dueDate: Date;
+  plannedExpenseId: string | null;
+}
+
 export function buildActualTransactionProjectionData(
   transactions: MaterializedActualTransaction[],
   balanceStartDate: Date,
-  includeStartDateTransactions = false
+  includeStartDateTransactions = false,
+  terminalOccurrences: TerminalOccurrenceForProjection[] = [],
 ): {
   actualTransactionsByDate: Map<string, ActualTransactionForDay[]>;
   coveredExpensesByDate: Map<string, Set<string>>;
+  terminalForecastExpenseIdsByDate: Map<string, Set<string>>;
 } {
   const actualTransactionsByDate = new Map<string, ActualTransactionForDay[]>();
   const coveredExpensesByDate = new Map<string, Set<string>>();
+  const terminalForecastExpenseIdsByDate = new Map<string, Set<string>>();
   const balanceStartKey = balanceStartDate.toISOString().split("T")[0];
 
+  for (const occurrence of terminalOccurrences) {
+    if (!occurrence.plannedExpenseId) continue;
+    const dueDateKey = occurrence.dueDate.toISOString().split("T")[0];
+    const terminal = terminalForecastExpenseIdsByDate.get(dueDateKey) ?? new Set<string>();
+    terminal.add(occurrence.plannedExpenseId);
+    terminalForecastExpenseIdsByDate.set(dueDateKey, terminal);
+  }
+
   for (const transaction of transactions) {
+    if (transaction.occurrence && (transaction.occurrence.status === "SKIPPED" || transaction.occurrence.status === "CANCELLED")) {
+      if (transaction.occurrence.plannedExpenseId) {
+        const dueDateKey = transaction.occurrence.dueDate.toISOString().split("T")[0];
+        const terminal = terminalForecastExpenseIdsByDate.get(dueDateKey) ?? new Set<string>();
+        terminal.add(transaction.occurrence.plannedExpenseId);
+        terminalForecastExpenseIdsByDate.set(dueDateKey, terminal);
+      }
+      continue;
+    }
     if (transaction.deletedAt) continue;
     if (transaction.occurrence && transaction.occurrence.status !== "COMPLETED") continue;
     const occurredDateKey = transaction.occurredAt.toISOString().split("T")[0];
@@ -121,7 +146,7 @@ export function buildActualTransactionProjectionData(
     coveredExpensesByDate.set(dueDateKey, covered);
   }
 
-  return { actualTransactionsByDate, coveredExpensesByDate };
+  return { actualTransactionsByDate, coveredExpensesByDate, terminalForecastExpenseIdsByDate };
 }
 
 export async function calculateBalanceAt(
@@ -193,7 +218,8 @@ export function applyDay(
   incomingTransfers: ItemWithAdjustments[],
   actualsForDay: ActualForDay[],
   coveredExpenseIds = new Set<string>(),
-  actualTransactionsForDay: ActualTransactionForDay[] = []
+  actualTransactionsForDay: ActualTransactionForDay[] = [],
+  terminalForecastExpenseIds = new Set<string>(),
 ): { balance: number; events: ProjectionEvent[] } {
   const events: ProjectionEvent[] = [];
   let balance = runningBalance;
@@ -275,7 +301,7 @@ export function applyDay(
     if (!expense.active) continue;
     if (expense.endDate && currentDate > expense.endDate) continue;
     if (matchesInterval(expense.interval, expense.startDate, currentDate)) {
-      if (coveredForecastIds.has(expense.id) || coveredExpenseIds.has(expense.id)) continue;
+      if (coveredForecastIds.has(expense.id) || coveredExpenseIds.has(expense.id) || terminalForecastExpenseIds.has(expense.id)) continue;
       const amount = getEffectiveAmount(expense, currentDate);
       const event: ProjectionEvent = {
         type: "expense",
@@ -394,6 +420,19 @@ router.get("/", async (req: Request, res: Response) => {
       }),
     ]);
 
+    const terminalOccurrences = await prisma.occurrence.findMany({
+      where: {
+        accountId,
+        status: { in: ["SKIPPED", "CANCELLED"] },
+        dueDate: {
+          gte: windowStart < todayUTC ? windowStart : todayUTC,
+          lte: windowEnd,
+        },
+        plannedExpenseId: { not: null },
+      },
+      select: { dueDate: true, plannedExpenseId: true },
+    });
+
     const materializedExpenses = await prisma.actualTransaction.findMany({
       where: { accountId, deletedAt: null },
       select: {
@@ -416,10 +455,11 @@ router.get("/", async (req: Request, res: Response) => {
         },
       },
     });
-    const { actualTransactionsByDate, coveredExpensesByDate } = buildActualTransactionProjectionData(
+    const projectionData = buildActualTransactionProjectionData(
       materializedExpenses,
       historical ? windowStart : todayUTC,
       historical,
+      terminalOccurrences,
     );
 
     // Build actuals map: "YYYY-MM-DD" → ActualForDay[]
@@ -470,9 +510,10 @@ router.get("/", async (req: Request, res: Response) => {
       while (current < windowStart) {
         const dateKey = current.toISOString().split("T")[0];
         const actualsForDay = actualsMap.get(dateKey) || [];
-        const coveredExpenseIds = coveredExpensesByDate.get(dateKey) ?? new Set<string>();
-        const actualTransactionsForDay = actualTransactionsByDate.get(dateKey) || [];
-        const result = applyDay(current, runningBalance, effectiveIncome, effectiveExpenses, incomingTransfers, actualsForDay, coveredExpenseIds, actualTransactionsForDay);
+        const coveredExpenseIds = projectionData.coveredExpensesByDate.get(dateKey) ?? new Set<string>();
+        const actualTransactionsForDay = projectionData.actualTransactionsByDate.get(dateKey) || [];
+        const terminalForecastExpenseIds = projectionData.terminalForecastExpenseIdsByDate.get(dateKey) ?? new Set<string>();
+        const result = applyDay(current, runningBalance, effectiveIncome, effectiveExpenses, incomingTransfers, actualsForDay, coveredExpenseIds, actualTransactionsForDay, terminalForecastExpenseIds);
         runningBalance = result.balance;
         current.setUTCDate(current.getUTCDate() + 1);
       }
@@ -485,9 +526,10 @@ router.get("/", async (req: Request, res: Response) => {
     while (current <= windowEnd) {
       const dateKey = current.toISOString().split("T")[0];
       const actualsForDay = actualsMap.get(dateKey) || [];
-      const coveredExpenseIds = coveredExpensesByDate.get(dateKey) ?? new Set<string>();
-      const actualTransactionsForDay = actualTransactionsByDate.get(dateKey) || [];
-      const result = applyDay(current, runningBalance, effectiveIncome, effectiveExpenses, incomingTransfers, actualsForDay, coveredExpenseIds, actualTransactionsForDay);
+      const coveredExpenseIds = projectionData.coveredExpensesByDate.get(dateKey) ?? new Set<string>();
+      const actualTransactionsForDay = projectionData.actualTransactionsByDate.get(dateKey) || [];
+      const terminalForecastExpenseIds = projectionData.terminalForecastExpenseIdsByDate.get(dateKey) ?? new Set<string>();
+      const result = applyDay(current, runningBalance, effectiveIncome, effectiveExpenses, incomingTransfers, actualsForDay, coveredExpenseIds, actualTransactionsForDay, terminalForecastExpenseIds);
       runningBalance = result.balance;
 
       projections.push({

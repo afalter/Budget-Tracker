@@ -1,6 +1,8 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { PrismaClient } from "@prisma/client";
 import { applyDay, buildActualTransactionProjectionData, calculateBalanceAt, calculateCurrentBalance, isHistoricalWindow } from "./projections";
+import { processDueOccurrencesForAccount } from "../lib/occurrenceProcessing";
+import { softDeleteActualTransaction } from "../lib/actualTransactionService";
 
 const prisma = new PrismaClient();
 const accountId = "projections-balance-test-account";
@@ -442,7 +444,7 @@ describe("calculateCurrentBalance", () => {
     expect(projection.events).toEqual([{ type: "expense", name: "Not covered", amount: 100, forecastExpenseId: expense.id }]);
   });
 
-  it("does not cover a planned expense for a soft-deleted transaction", async () => {
+  it("does not reproject a planned expense for a soft-deleted transaction", async () => {
     const today = date("2026-10-27");
     const expense = await prisma.plannedExpense.create({
       data: { id: expenseId, accountId, name: "Deleted actual", amount: 100, interval: "ONE_TIME", startDate: today },
@@ -458,10 +460,24 @@ describe("calculateCurrentBalance", () => {
       data: { accountId, type: "EXPENSE", origin: "AUTOMATIC", amount: 100, occurredAt: today, occurrenceId: occurrence.id, deletedAt: new Date() },
     });
 
-    const projection = applyDay(today, 1000, [], [{ ...expense, category: expense.category, priceAdjustments: [] }], [], []);
+    const projectionData = buildActualTransactionProjectionData([{
+      type: "EXPENSE", amount: 100, occurredAt: today, deletedAt: new Date(), note: null, category: null,
+      occurrence: { status: "COMPLETED", dueDate: today, plannedExpenseId: expense.id, nameSnapshot: expense.name, categorySnapshot: null },
+    }], today, false, [{ dueDate: today, plannedExpenseId: expense.id }]);
+    const projection = applyDay(
+      today,
+      1000,
+      [],
+      [{ ...expense, category: expense.category, priceAdjustments: [] }],
+      [],
+      [],
+      projectionData.coveredExpensesByDate.get("2026-10-27"),
+      projectionData.actualTransactionsByDate.get("2026-10-27"),
+      projectionData.terminalForecastExpenseIdsByDate.get("2026-10-27"),
+    );
 
-    expect(projection.balance).toBe(900);
-    expect(projection.events).toEqual([{ type: "expense", name: "Deleted actual", amount: 100, forecastExpenseId: expense.id }]);
+    expect(projection.balance).toBe(1000);
+    expect(projection.events).toEqual([]);
   });
 
   it("does not display or apply a soft-deleted actual transaction", async () => {
@@ -476,7 +492,7 @@ describe("calculateCurrentBalance", () => {
     expect(projection.events).toEqual([]);
   });
 
-  it("keeps a same-day planned expense when the actual transaction is terminal", async () => {
+  it("suppresses a same-day planned expense when its occurrence is skipped", async () => {
     const today = date("2026-10-27");
     const expense = await prisma.plannedExpense.create({
       data: { id: expenseId, accountId, name: "Terminal occurrence", amount: 100, interval: "ONE_TIME", startDate: today },
@@ -484,11 +500,74 @@ describe("calculateCurrentBalance", () => {
     const projectionData = buildActualTransactionProjectionData([{
       type: "EXPENSE", amount: 100, occurredAt: today, deletedAt: null, note: null, category: null,
       occurrence: { status: "SKIPPED", dueDate: today, plannedExpenseId: expense.id, nameSnapshot: expense.name, categorySnapshot: null },
-    }], today);
-    const projection = applyDay(today, 1000, [], [{ ...expense, category: expense.category, priceAdjustments: [] }], [], [], projectionData.coveredExpensesByDate.get("2026-10-27"), projectionData.actualTransactionsByDate.get("2026-10-27"));
+    }], today, false, [{ dueDate: today, plannedExpenseId: expense.id }]);
+    const projection = applyDay(today, 1000, [], [{ ...expense, category: expense.category, priceAdjustments: [] }], [], [], projectionData.coveredExpensesByDate.get("2026-10-27"), projectionData.actualTransactionsByDate.get("2026-10-27"), projectionData.terminalForecastExpenseIdsByDate.get("2026-10-27"));
 
-    expect(projection.balance).toBe(900);
-    expect(projection.events).toEqual([{ type: "expense", name: "Terminal occurrence", amount: 100, forecastExpenseId: expense.id }]);
+    expect(projection.balance).toBe(1000);
+    expect(projection.events).toEqual([]);
+  });
+
+  it("suppresses a cancelled occurrence without suppressing the next forecast", async () => {
+    const dueDate = date("2026-10-27");
+    const nextDate = date("2026-10-28");
+    const expense = await prisma.plannedExpense.create({
+      data: { id: expenseId, accountId, name: "Cancelled occurrence", amount: 100, interval: "DAILY", startDate: dueDate },
+    });
+    const occurrence = await prisma.occurrence.create({
+      data: {
+        accountId, type: "EXPENSE", status: "CANCELLED", plannedExpenseId: expense.id,
+        anchorDate: dueDate, dueDate, plannedAmount: 100, effectiveAmount: 100,
+        identityKey: `PLANNED_EXPENSE:${expense.id}:2026-10-27`, nameSnapshot: expense.name, originalRuleId: expense.id,
+      },
+    });
+    const projectionData = buildActualTransactionProjectionData([], dueDate, false, [{
+      dueDate: occurrence.dueDate,
+      plannedExpenseId: occurrence.plannedExpenseId,
+    }]);
+    const effectiveExpense = { ...expense, category: expense.category, priceAdjustments: [] };
+
+    const cancelled = applyDay(dueDate, 1000, [], [effectiveExpense], [], [], new Set(), [], projectionData.terminalForecastExpenseIdsByDate.get("2026-10-27"));
+    const next = applyDay(nextDate, cancelled.balance, [], [effectiveExpense], [], [], new Set(), [], projectionData.terminalForecastExpenseIdsByDate.get("2026-10-28"));
+
+    expect(cancelled.balance).toBe(1000);
+    expect(cancelled.events).toEqual([]);
+    expect(next.balance).toBe(900);
+    expect(next.events).toEqual([{ type: "expense", name: "Cancelled occurrence", amount: 100, forecastExpenseId: expense.id }]);
+  });
+
+  it("does not reproject a deleted automatic transaction and keeps the next occurrence", async () => {
+    const dueDate = date("2026-10-27");
+    const nextDate = date("2026-10-28");
+    const snapshot = await prisma.balanceSnapshot.create({
+      data: { accountId, amount: 1000, date: date("2026-10-26") },
+    });
+    const expense = await prisma.plannedExpense.create({
+      data: { id: expenseId, accountId, name: "Deleted automatic expense", amount: 100, interval: "DAILY", startDate: dueDate },
+    });
+
+    await processDueOccurrencesForAccount(prisma, accountId, dueDate);
+    const transaction = await prisma.actualTransaction.findFirstOrThrow({ where: { accountId, occurrence: { plannedExpenseId: expense.id } } });
+    await softDeleteActualTransaction(prisma, accountId, transaction.id);
+    const occurrence = await prisma.occurrence.findUniqueOrThrow({ where: { id: transaction.occurrenceId! } });
+    expect(occurrence.status).toBe("SKIPPED");
+
+    const transactions = await prisma.actualTransaction.findMany({
+      where: { accountId },
+      select: {
+        id: true, type: true, amount: true, occurredAt: true, deletedAt: true, note: true, category: true,
+        occurrence: { select: { status: true, dueDate: true, plannedExpenseId: true, nameSnapshot: true, categorySnapshot: true, incomeSourceId: true } },
+      },
+    });
+    const projectionData = buildActualTransactionProjectionData(transactions, dueDate, false, [occurrence]);
+    const effectiveExpense = { ...expense, category: expense.category, priceAdjustments: [] };
+
+    const skipped = applyDay(dueDate, await calculateCurrentBalance(prisma, accountId, snapshot, dueDate), [], [effectiveExpense], [], [], projectionData.coveredExpensesByDate.get("2026-10-27"), projectionData.actualTransactionsByDate.get("2026-10-27"), projectionData.terminalForecastExpenseIdsByDate.get("2026-10-27"));
+    const next = applyDay(nextDate, skipped.balance, [], [effectiveExpense], [], [], projectionData.coveredExpensesByDate.get("2026-10-28"), projectionData.actualTransactionsByDate.get("2026-10-28"), projectionData.terminalForecastExpenseIdsByDate.get("2026-10-28"));
+
+    expect(skipped.balance).toBe(1000);
+    expect(skipped.events).toEqual([]);
+    expect(next.balance).toBe(900);
+    expect(next.events).toEqual([{ type: "expense", name: "Deleted automatic expense", amount: 100, forecastExpenseId: expense.id }]);
   });
 
   it("shows a completed actual transaction on its due date without applying it twice", async () => {
